@@ -261,7 +261,7 @@ async def test_generate_success(client, mock_gemini_webapi_client_instance):
     expected_json = {
         "response": "Test response",
         "thoughts": "Test thoughts for generate",
-        "images": [{ "url": "http://example.com/gen_img1.jpg", "title": "Gen Title 1", "alt": "Gen Alt 1" }] # Updated
+        "images": [{ "url": "http://example.com/gen_img1.jpg", "title": "Gen Title 1", "alt": "Gen Alt 1", "image_type": "unknown" }]
     }
     assert response.json() == expected_json
     mock_gemini_webapi_client_instance.init.assert_called_once()
@@ -312,7 +312,7 @@ async def test_chat_continue_session_success(client, mock_gemini_webapi_client_i
     # The mock_client_instance.start_chat by default returns a MockChatSession
     # which in turn returns a MockGeminiResponse with default thoughts and images from the fixture.
     initial_chat_response_images = [
-        {"url": "http://example.com/chat_img1.jpg", "title": "Chat Title 1", "alt": "Chat Alt 1"}
+        {"url": "http://example.com/chat_img1.jpg", "title": "Chat Title 1", "alt": "Chat Alt 1", "image_type": "unknown"}
     ]
 
     response_new_chat = await client.post("/chat", json={"prompt": "First message"})
@@ -337,7 +337,7 @@ async def test_chat_continue_session_success(client, mock_gemini_webapi_client_i
     json_response = response.json()
     assert json_response["response"] == "Continued chat response"
     assert json_response["thoughts"] == "Continued thoughts"
-    assert json_response["images"] == [{"url": "http://example.com/cont_img.jpg", "title": "Cont Title", "alt": "Cont Alt"}]
+    assert json_response["images"] == [{"url": "http://example.com/cont_img.jpg", "title": "Cont Title", "alt": "Cont Alt", "image_type": "unknown"}]
 
     mock_gemini_webapi_client_instance.init.assert_not_called()
     mock_gemini_webapi_client_instance.start_chat.assert_not_called()

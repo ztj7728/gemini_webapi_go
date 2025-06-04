@@ -7,7 +7,7 @@ from typing import Optional, List # Added List for List[ImageDetail]
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field # Added Field for validation
-from gemini_webapi import GeminiClient, ChatSession
+from gemini_webapi import GeminiClient, ChatSession, WebImage, GeneratedImage # Added WebImage, GeneratedImage
 
 # It's good to be aware of specific exceptions the library might raise
 # from gemini_webapi.exceptions import GeminiError, AuthenticationError, TimeoutError # Example, if they exist
@@ -44,6 +44,7 @@ class ImageDetail(BaseModel):
     url: str
     title: Optional[str] = None
     alt: Optional[str] = None
+    image_type: str # New field
 
 class GenerateResponse(BaseModel):
     response: str
@@ -161,10 +162,17 @@ async def generate_text(request: PromptRequest):
         if hasattr(response, 'images') and response.images:
             image_details_list = []
             for img in response.images:
+                img_type_str = "unknown" # Default
+                if isinstance(img, GeneratedImage):
+                    img_type_str = "generated"
+                elif isinstance(img, WebImage):
+                    img_type_str = "web"
+
                 image_details_list.append(ImageDetail(
                     url=getattr(img, 'url', ''),
                     title=getattr(img, 'title', None),
-                    alt=getattr(img, 'alt', None)
+                    alt=getattr(img, 'alt', None),
+                    image_type=img_type_str # Add this
                 ))
         return GenerateResponse(response=text_response, thoughts=thoughts_response, images=image_details_list)
 
@@ -225,10 +233,17 @@ async def chat_with_gemini(request: ChatRequest):
         if hasattr(response, 'images') and response.images:
             image_details_list = []
             for img in response.images:
+                img_type_str = "unknown" # Default
+                if isinstance(img, GeneratedImage):
+                    img_type_str = "generated"
+                elif isinstance(img, WebImage):
+                    img_type_str = "web"
+
                 image_details_list.append(ImageDetail(
                     url=getattr(img, 'url', ''),
                     title=getattr(img, 'title', None),
-                    alt=getattr(img, 'alt', None)
+                    alt=getattr(img, 'alt', None),
+                    image_type=img_type_str # Add this
                 ))
         return ChatResponse(response=text_response, chat_id=chat_id, thoughts=thoughts_response, images=image_details_list)
 
