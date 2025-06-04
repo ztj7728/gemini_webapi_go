@@ -1,0 +1,13 @@
+{
+    "cookies": {
+        "GEMINI_SECURE_1PSID": null,
+        "GEMINI_SECURE_1PSIDTS": null
+    },
+    "server": {
+        "host": "0.0.0.0",
+        "port": 8000
+    },
+    "gemini_settings": {
+        "default_model": null
+    }
+}

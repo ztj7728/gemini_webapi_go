@@ -1,0 +1,6 @@
+fastapi
+gemini_webapi
+uvicorn
+pytest
+pytest-asyncio
+httpx
