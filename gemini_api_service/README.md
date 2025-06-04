@@ -152,6 +152,12 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
     - `title` (string, optional): The title of the image, if available.
     - `alt` (string, optional): A descriptive alternative text for the image, if available.
 
+    > **Important Note on Image URLs**: The `url` provided in the `ImageDetail` object may not always be a direct link to an image file (e.g., a `.jpg` or `.png` file). It could be a link to a Google content page, a temporary CDN link, or another type of URL that requires specific handling.
+    > Client applications and AI tools might not be able to display these URLs directly as inline images. It's recommended that client applications:
+    > -   Attempt to display the image, but handle potential failures gracefully.
+    > -   Consider offering an option to open the URL in a web browser to view the image content.
+    > -   Utilize the `title` and `alt` fields for context, especially if direct image rendering is problematic.
+
 ### 2. Chat (Multi-turn Conversation)
 
 *   **Endpoint:** `POST /chat`
@@ -208,7 +214,7 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
     - `response` (string): The textual response from the Gemini model.
     - `chat_id` (string): The unique identifier for the chat session.
     - `thoughts` (string, optional): Contains the model's thought process if available.
-    - `images` (array of ImageDetail objects, optional): A list of images. (See `ImageDetail Object Structure` under the `/generate` endpoint).
+    - `images` (array of ImageDetail objects, optional): A list of images. (See `ImageDetail Object Structure` and important notes on URLs under the `/generate` endpoint description).
 
 *   **Example Request (Continuing Chat):**
     ```bash
