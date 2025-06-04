@@ -46,32 +46,43 @@ The service uses a `config.json` file located in its root directory (`gemini_api
     },
     "gemini_settings": {
         "default_model": "gemini-2.5-pro"
+    },
+    "image_serving": {
+        "save_path": "saved_images",
+        "serve_path_prefix": "/served_images",
+        "public_base_url": "http://localhost:8000"
     }
 }
 ```
-*   `gemini_settings.default_model`: Specifies the default Gemini model to be used for requests if no model is provided in the API call (e.g., "gemini-2.5-pro"). Set to `null` or an empty string to use the `gemini_webapi` library's internal default. See "Available Models" below.
+-   `cookies`: Stores authentication cookies for the `gemini_webapi`.
+    -   `GEMINI_SECURE_1PSID`: Your `__Secure-1PSID` cookie.
+    -   `GEMINI_SECURE_1PSIDTS`: Your `__Secure-1PSIDTS` cookie.
+-   `server`: Configures the API server.
+    -   `host` (string): Host for the Uvicorn server (default: "0.0.0.0").
+    -   `port` (integer): Port for the Uvicorn server (default: 8000).
+-   `gemini_settings`: Specific settings for Gemini interactions.
+    -   `default_model` (string, optional): Specifies the default Gemini model if not provided in an API request (e.g., "gemini-2.5-pro"). Set to `null` or empty to use library default. See "Available Models".
+-   `image_serving`: Configures how images returned by Gemini are handled.
+    -   `save_path` (string): Directory where images are saved locally by the API service (default: "saved_images").
+    -   `serve_path_prefix` (string): URL path prefix for serving saved images (default: "/served_images").
+    -   `public_base_url` (string): Public base URL of this API service. **Crucial for correct absolute image URLs if behind a proxy or on a custom domain.** (Default: "http://localhost:8000"). Users should update this to their actual public-facing base URL.
 
 **First Run / `config.json` Creation:**
-- If `config.json` does not exist when the service starts, it will be automatically created with default server settings.
-- During this initial creation, the service will attempt to populate `cookies.GEMINI_SECURE_1PSID` and `cookies.GEMINI_SECURE_1PSIDTS` from the corresponding environment variables (`GEMINI_SECURE_1PSID`, `GEMINI_SECURE_1PSIDTS`).
-- If these environment variables are not set, the cookie values in the generated `config.json` will be `null`. In this case, you **must manually edit `config.json`** to provide valid cookie values for the service to operate correctly.
+- If `config.json` does not exist when the service starts, it will be automatically created with the default values shown above.
+- During this initial creation, the service will attempt to populate `cookies.GEMINI_SECURE_1PSID` and `cookies.GEMINI_SECURE_1PSIDTS` from corresponding environment variables.
+- If these environment variables are not set, cookie values in `config.json` will be `null`, requiring manual editing for the service to operate.
 
 **Cookie Management:**
-- **Primary Source**: Once `config.json` exists, it is the primary source for cookie values at service startup.
-- **`GEMINI_SECURE_1PSIDTS` (Auto-Updated in `config.json`)**:
-    - This cookie is read from `config.json` when the service starts.
-    - The `gemini_webapi` library, with `auto_refresh` enabled (as used in this service), attempts to refresh this cookie automatically during its operations.
-    - **Crucially, if the service successfully refreshes `__Secure-1PSIDTS`, the new value is automatically written back to `config.json`**. This helps keep the configuration persistent and reduces the need for manual updates for this cookie, allowing subsequent service restarts to use the latest valid `__Secure-1PSIDTS`.
-- **`GEMINI_SECURE_1PSID`**:
-    - This cookie is read from `config.json`.
-    - It is **not** automatically refreshed or updated in `config.json` by this service.
-    - If this cookie expires, you will need to manually update its value in `config.json` and restart the service.
-- **Environment Variable Fallback (During Client Initialization)**: If `config.json` contains `null` or empty values for cookies, the service will attempt to use `GEMINI_SECURE_1PSID` and `GEMINI_SECURE_1PSIDTS` from environment variables as a fallback during the Gemini client initialization. This is primarily to support initial setup or temporary overrides if `config.json` is not fully configured. However, for persistent changes, especially for `GEMINI_SECURE_1PSID`, `config.json` should be updated.
+- **Primary Source**: `config.json` is the primary source for cookies at startup.
+- **`GEMINI_SECURE_1PSIDTS` Auto-Update**: If `gemini_webapi` refreshes `__Secure-1PSIDTS`, the new value is automatically saved back to `config.json`.
+- **`GEMINI_SECURE_1PSID` Manual Update**: This cookie is not auto-refreshed; update it manually in `config.json` if it expires.
+- **Environment Variable Fallback**: If cookies in `config.json` are `null` or empty, the service tries to use environment variables during client initialization.
 
-**Server Configuration:**
-- `server.host`: Defines the host on which the Uvicorn server will listen (default: "0.0.0.0").
-- `server.port`: Defines the port for the Uvicorn server (default: 8000).
-Changes to these values in `config.json` require a service restart.
+**Image Handling / Relaying:**
+The API service attempts to download images returned by Gemini (from their original Google URLs), saves them locally to the configured `save_path`, and then serves them directly from this API. This provides more stable and directly usable image links in API responses.
+- The `url` field in the `ImageDetail` object (see API Endpoints section) will point to this API-served URL.
+- The `original_google_url` field will store the initial URL provided by Gemini.
+- **Storage Considerations**: Images are saved in the `save_path` directory. Users should consider managing this directory if storage space is a concern over long periods, as no automatic cleanup is implemented by this service.
 
 **Available Models**
 The `model` parameter in API requests or `default_model` in `config.json` should be one of the model strings recognized by the `gemini_webapi` library. As of the current version, these include:
@@ -108,31 +119,21 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
     # Example with model specified
     curl -X POST "http://localhost:8000/generate" \
          -H "Content-Type: application/json" \
-         -d '{"prompt": "Hello, what is the capital of France?", "model": "gemini-2.5-flash"}'
-
-    # Example without model (uses default configuration)
-    curl -X POST "http://localhost:8000/generate" \
-         -H "Content-Type: application/json" \
-         -d '{"prompt": "Tell me a joke."}'
+         -d '{"prompt": "Show me a picture of a cat", "model": "gemini-2.5-flash"}'
     ```
 *   **Example Response:**
     The response includes the generated text, optionally the model's thought process, and optionally a list of images.
     ```json
     {
-        "response": "Here are some pictures of cats.",
-        "thoughts": "User asked for cat pictures.",
+        "response": "Okay, here is a picture of a cat:",
+        "thoughts": "User asked for a cat picture. I found one.",
         "images": [
             {
-                "url": "http://example.com/cat1.jpg",
-                "title": "A cute cat",
-                "alt": "A fluffy white cat lying on a rug.",
-                "image_type": "web"
-            },
-            {
-                "url": "http://example.com/cat2.png",
-                "title": "Another cat",
-                "alt": "A tabby cat playing with a toy.",
-                "image_type": "generated"
+                "url": "http://localhost:8000/served_images/bf2d8a2d-8c8c-4a2e-90de-62e5bcd47929.png",
+                "title": "A playful cat",
+                "alt": "A tabby cat chasing a red laser dot.",
+                "image_type": "web",
+                "original_google_url": "https://example.com/original_cat_image.jpg"
             }
         ]
     }
@@ -150,19 +151,16 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
     - `images` (array of ImageDetail objects, optional): A list of images included in the response. Will be `null` if no images are present. (See `ImageDetail Object Structure` below for details).
 
     **ImageDetail Object Structure:**
-    - `url` (string): The direct URL to the image. (See "Important Note on Image URLs" immediately below this structure).
+    - `url` (string): The URL from which the image can be fetched, now served directly by this API service. This URL points to a locally saved copy of the image.
     - `title` (string, optional): The title of the image, if available.
     - `alt` (string, optional): A descriptive alternative text for the image, if available.
     - `image_type` (string): Indicates the type of image. Possible values:
         - `"generated"`: An image generated by the AI.
         - `"web"`: An image found on the web.
         - `"unknown"`: The type could not be determined.
+    - `original_google_url` (string, optional): The original URL for the image as provided by Google via the `gemini_webapi`.
 
-    > **Important Note on Image URLs**: The `url` provided in the `ImageDetail` object may not always be a direct link to an image file (e.g., a `.jpg` or `.png` file). It could be a link to a Google content page, a temporary CDN link, or another type of URL that requires specific handling.
-    > Client applications and AI tools might not be able to display these URLs directly as inline images. It's recommended that client applications:
-    > -   Attempt to display the image, but handle potential failures gracefully.
-    > -   Consider offering an option to open the URL in a web browser to view the image content.
-    > -   Utilize the `title` and `alt` fields for context, especially if direct image rendering is problematic.
+    > **Note on Image URLs**: The service attempts to download images and serve them directly. The `url` field points to this API-served version. The `original_google_url` field preserves the source URL from Google. This relaying provides more stable image access for clients.
 
 ### 2. Chat (Multi-turn Conversation)
 
@@ -182,38 +180,24 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
 
 *   **Example Request (New Chat):**
     ```bash
-    # New chat specifying a model
     curl -X POST "http://localhost:8000/chat" \
          -H "Content-Type: application/json" \
-         -d '{"prompt": "Hi, can you tell me a fun fact?", "model": "gemini-2.5-flash"}'
-
-    # New chat using default model configuration
-    curl -X POST "http://localhost:8000/chat" \
-         -H "Content-Type: application/json" \
-         -d '{"prompt": "What is your default model?"}'
+         -d '{"prompt": "Can you find an image of a dog?", "model": "gemini-2.5-flash"}'
     ```
 *   **Example Response (New Chat):**
     The response includes the generated text, the chat session ID, and optionally, the model's thought process and any images.
     ```json
     {
-        "response": "Sure! Did you know that honey never spoils?",
+        "response": "Here is an image of a dog:",
         "chat_id": "a_unique_chat_id_generated_by_the_service",
-        "thoughts": "User asked for a fun fact. Honey not spoiling is a good one.",
-        "images": null
-    }
-    ```
-    Or, with images:
-    ```json
-    {
-        "response": "Here's an image you requested.",
-        "chat_id": "another_unique_chat_id",
-        "thoughts": "User asked for a specific image.",
+        "thoughts": "User asked for a dog image.",
         "images": [
             {
-                "url": "http://example.com/requested_image.jpg",
-                "title": "Requested Image",
-                "alt": "Details about the requested image.",
-                "image_type": "generated"
+                "url": "http://localhost:8000/served_images/a1b2c3d4-e5f6-7890-1234-567890abcdef.png",
+                "title": "Friendly Dog",
+                "alt": "A golden retriever smiling.",
+                "image_type": "web",
+                "original_google_url": "https://example.com/original_dog_image.jpg"
             }
         ]
     }

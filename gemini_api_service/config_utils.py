@@ -17,6 +17,11 @@ DEFAULT_CONFIG = {
     },
     "gemini_settings": {
         "default_model": None
+    },
+    "image_serving": {
+        "save_path": "saved_images",
+        "serve_path_prefix": "/served_images",
+        "public_base_url": "http://localhost:8000"
     }
 }
 
@@ -61,7 +66,8 @@ def load_config() -> dict:
                 if not all(k in loaded_config for k in DEFAULT_CONFIG.keys()) or \
                    not all(k in loaded_config.get("cookies", {}) for k in DEFAULT_CONFIG["cookies"].keys()) or \
                    not all(k in loaded_config.get("server", {}) for k in DEFAULT_CONFIG["server"].keys()) or \
-                   not all(k in loaded_config.get("gemini_settings", {}) for k in DEFAULT_CONFIG["gemini_settings"].keys()):
+                   not all(k in loaded_config.get("gemini_settings", {}) for k in DEFAULT_CONFIG["gemini_settings"].keys()) or \
+                   not all(k in loaded_config.get("image_serving", {}) for k in DEFAULT_CONFIG["image_serving"].keys()): # Added check for image_serving
                     print(f"Info: Configuration at '{CONFIG_FILE_PATH}' was updated with default values for missing keys.", file=sys.stderr)
                     config_needs_saving = True
 

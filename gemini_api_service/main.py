@@ -5,6 +5,7 @@ import sys # Added for sys.stderr
 from typing import Optional, List # Added List for List[ImageDetail]
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles # Added for static file serving
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field # Added Field for validation
 from gemini_webapi import GeminiClient, ChatSession, WebImage, GeneratedImage # Added WebImage, GeneratedImage
@@ -18,6 +19,17 @@ app_config = load_config()
 
 
 app = FastAPI()
+
+# Setup static file serving for images
+image_save_path = app_config.get("image_serving", {}).get("save_path", "saved_images")
+image_serve_prefix = app_config.get("image_serving", {}).get("serve_path_prefix", "/served_images")
+
+# Ensure the save directory exists
+os.makedirs(image_save_path, exist_ok=True)
+
+# Mount the directory to serve images
+app.mount(image_serve_prefix, StaticFiles(directory=image_save_path), name="served_images")
+
 
 # Global store for chat sessions
 chat_sessions: dict[str, ChatSession] = {}
@@ -41,10 +53,11 @@ class ChatRequest(BaseModel):
 
 # Response Models
 class ImageDetail(BaseModel):
-    url: str
+    url: str  # This will be the API-served URL
     title: Optional[str] = None
     alt: Optional[str] = None
-    image_type: str # New field
+    image_type: str
+    original_google_url: Optional[str] = None # New field
 
 class GenerateResponse(BaseModel):
     response: str
@@ -161,19 +174,39 @@ async def generate_text(request: PromptRequest):
         image_details_list = None
         if hasattr(response, 'images') and response.images:
             image_details_list = []
-            for img in response.images:
-                img_type_str = "unknown" # Default
-                if isinstance(img, GeneratedImage):
-                    img_type_str = "generated"
-                elif isinstance(img, WebImage):
-                    img_type_str = "web"
+            # Retrieve image serving config here, once before the loop
+            img_conf = app_config.get("image_serving", {})
+            img_save_path = img_conf.get("save_path", "saved_images")
+            public_base_url = img_conf.get("public_base_url", "http://localhost:8000").rstrip('/')
+            serve_path_prefix = img_conf.get("serve_path_prefix", "/served_images").rstrip('/')
 
-                image_details_list.append(ImageDetail(
-                    url=getattr(img, 'url', ''),
-                    title=getattr(img, 'title', None),
-                    alt=getattr(img, 'alt', None),
-                    image_type=img_type_str # Add this
-                ))
+            for img in response.images:
+                original_url = getattr(img, 'url', '')
+                unique_filename = f"{uuid.uuid4().hex}.png" # Assuming PNG for now
+                full_save_filepath = os.path.join(img_save_path, unique_filename)
+                api_served_url = f"{public_base_url}{serve_path_prefix}/{unique_filename}"
+
+                try:
+                    # Assuming img.save takes directory and filename separately based on earlier correction
+                    await img.save(path=img_save_path, filename=unique_filename)
+
+                    img_type_str = "unknown"
+                    if isinstance(img, GeneratedImage):
+                        img_type_str = "generated"
+                    elif isinstance(img, WebImage):
+                        img_type_str = "web"
+
+                    image_details_list.append(ImageDetail(
+                        url=api_served_url,
+                        title=getattr(img, 'title', None),
+                        alt=getattr(img, 'alt', None),
+                        image_type=img_type_str,
+                        original_google_url=original_url
+                    ))
+                except Exception as e:
+                    print(f"Error saving image {original_url} to {full_save_filepath}: {e}", file=sys.stderr)
+                    # Optionally, still add to list with original_url and error note, or skip
+                    # For now, skipping if save fails
         return GenerateResponse(response=text_response, thoughts=thoughts_response, images=image_details_list)
 
     except HTTPException: # Re-raise HTTPExceptions from get_gemini_client
@@ -232,19 +265,37 @@ async def chat_with_gemini(request: ChatRequest):
         image_details_list = None
         if hasattr(response, 'images') and response.images:
             image_details_list = []
-            for img in response.images:
-                img_type_str = "unknown" # Default
-                if isinstance(img, GeneratedImage):
-                    img_type_str = "generated"
-                elif isinstance(img, WebImage):
-                    img_type_str = "web"
+            # Retrieve image serving config here, once before the loop
+            img_conf = app_config.get("image_serving", {})
+            img_save_path = img_conf.get("save_path", "saved_images")
+            public_base_url = img_conf.get("public_base_url", "http://localhost:8000").rstrip('/')
+            serve_path_prefix = img_conf.get("serve_path_prefix", "/served_images").rstrip('/')
 
-                image_details_list.append(ImageDetail(
-                    url=getattr(img, 'url', ''),
-                    title=getattr(img, 'title', None),
-                    alt=getattr(img, 'alt', None),
-                    image_type=img_type_str # Add this
-                ))
+            for img in response.images:
+                original_url = getattr(img, 'url', '')
+                unique_filename = f"{uuid.uuid4().hex}.png" # Assuming PNG
+                full_save_filepath = os.path.join(img_save_path, unique_filename)
+                api_served_url = f"{public_base_url}{serve_path_prefix}/{unique_filename}"
+
+                try:
+                    await img.save(path=img_save_path, filename=unique_filename)
+
+                    img_type_str = "unknown"
+                    if isinstance(img, GeneratedImage):
+                        img_type_str = "generated"
+                    elif isinstance(img, WebImage):
+                        img_type_str = "web"
+
+                    image_details_list.append(ImageDetail(
+                        url=api_served_url,
+                        title=getattr(img, 'title', None),
+                        alt=getattr(img, 'alt', None),
+                        image_type=img_type_str,
+                        original_google_url=original_url
+                    ))
+                except Exception as e:
+                    print(f"Error saving image {original_url} to {full_save_filepath}: {e}", file=sys.stderr)
+                    # Skipping problematic image
         return ChatResponse(response=text_response, chat_id=chat_id, thoughts=thoughts_response, images=image_details_list)
 
     except HTTPException: # Re-raise HTTPExceptions (from get_gemini_client or chat_id not found)

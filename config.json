@@ -9,5 +9,10 @@
     },
     "gemini_settings": {
         "default_model": null
+    },
+    "image_serving": {
+        "save_path": "saved_images",
+        "serve_path_prefix": "/served_images",
+        "public_base_url": "http://localhost:8000"
     }
 }
