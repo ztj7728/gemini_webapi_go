@@ -3,6 +3,7 @@ import uuid # Added for unique chat IDs
 import asyncio # Added for asyncio.Lock
 import sys # Added for sys.stderr
 from typing import Optional, List # Added List for List[ImageDetail]
+from datetime import datetime # Added for ISO 8601 timestamp
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles # Added for static file serving
@@ -69,6 +70,75 @@ class ChatResponse(BaseModel):
     chat_id: str
     thoughts: Optional[str] = None
     images: Optional[List[ImageDetail]] = None
+
+# Ollama Compatibility Models
+class OllamaGenerateRequest(BaseModel):
+    model: str
+    prompt: str
+    stream: Optional[bool] = Field(default=False)
+    # Common optional fields (not used by this service's logic yet)
+    system: Optional[str] = None
+    template: Optional[str] = None
+    context: Optional[List[int]] = None # List[int] is how Ollama represents context
+    options: Optional[dict] = None
+
+class OllamaGenerateResponse(BaseModel):
+    model: str
+    created_at: str  # ISO 8601 timestamp string
+    response: str
+    done: bool = Field(default=True) # Always True for non-streaming
+    # Common optional fields (not populated by this service yet)
+    # total_duration: Optional[int] = None
+    # load_duration: Optional[int] = None
+    # prompt_eval_count: Optional[int] = None
+    # eval_count: Optional[int] = None
+
+@app.post("/ollama/api/generate", response_model=OllamaGenerateResponse)
+async def ollama_generate_completion(request: OllamaGenerateRequest):
+    if request.stream:
+        # Note: main.py already has HTTPException imported from fastapi
+        raise HTTPException(status_code=400, detail="Streaming is not supported for this endpoint. Please set 'stream': false.")
+
+    client = await get_gemini_client() # Singleton client
+
+    model_to_use_for_gemini = None
+    if request.model and isinstance(request.model, str) and request.model.strip():
+        # Pass through the model name if provided.
+        # The gemini_webapi client will use its own default or raise error if invalid for Gemini.
+        model_to_use_for_gemini = request.model
+
+    if not model_to_use_for_gemini: # If request.model was empty, not sensible, or not provided
+        config_default_model = app_config.get("gemini_settings", {}).get("default_model")
+        if config_default_model and isinstance(config_default_model, str) and config_default_model.strip():
+            model_to_use_for_gemini = config_default_model
+
+    try:
+        gemini_response = await client.generate_content(
+            prompt=request.prompt,
+            model=model_to_use_for_gemini # This can be None, gemini_webapi handles its default
+        )
+    except Exception as e:
+        print(f"Error calling Gemini API via Ollama endpoint: {e}", file=sys.stderr)
+        # Consider more specific error mapping if needed, e.g. model not found vs. other API errors
+        raise HTTPException(status_code=502, detail=f"Error communicating with Gemini API: {str(e)}")
+
+    # Determine the model name to include in the response.
+    # Ollama clients expect the model they requested to be in the response.
+    # If no model was in the request, use the one we determined (config default or None).
+    # If model_to_use_for_gemini ended up being None (so gemini_webapi used its absolute default),
+    # we should reflect that appropriately. For now, if request.model is empty, use our determined model or placeholder.
+    response_model_name = request.model
+    if not response_model_name and model_to_use_for_gemini: # Request was empty, but we used a default
+        response_model_name = model_to_use_for_gemini
+    elif not response_model_name: # Request was empty, and we didn't have a default (so gemini_webapi used its own)
+        response_model_name = "gemini_api_default" # Placeholder, as we don't know the exact internal default name of gemini_webapi
+
+    return OllamaGenerateResponse(
+        model=response_model_name,
+        created_at=datetime.utcnow().isoformat() + "Z",
+        response=gemini_response.text,
+        # `done` is True by default in Pydantic model
+    )
 
 async def get_gemini_client() -> GeminiClient:
     """

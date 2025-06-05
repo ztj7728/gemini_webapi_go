@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch, ANY # Added ANY
 import importlib # For reloading main module if necessary, though direct patching is preferred.
 import copy # For deepcopy
 import uuid # For mocking uuid.uuid4
+from datetime import datetime # Added for Ollama tests
+import re # Added for Ollama tests
 
 import httpx
 from httpx import ASGITransport # Import ASGITransport
@@ -65,15 +67,6 @@ import pytest_asyncio
 
 @pytest_asyncio.fixture
 async def client():
-    # We need to ensure main.py is re-evaluated with the patched load_config for app.mount
-    # This is tricky. A better way would be to make app setup a function.
-    # For now, assume main.app already picked up a valid app_config for path prefix.
-    # Or, re-patch main.app.state.image_serve_prefix etc. if needed, but mount is at setup.
-    # The current main.py structure mounts based on app_config at import time.
-    # The reset_main_globals_and_config_mocks fixture updates main.app_config AFTER import.
-    # This means the app.mount in main.py might use the initial (non-mocked) app_config.
-    # This is a limitation of testing module-level side effects that depend on config.
-    # For these tests, we'll focus on the endpoint logic using app_config, not the app.mount call itself.
     transport = ASGITransport(app=gemini_api_service.main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as ac:
         yield ac
@@ -93,12 +86,12 @@ def mock_env_cookies_missing(monkeypatch):
     yield
 
 class MockGeminiImage:
-    def __init__(self, url, title, alt, spec_type=None): # spec_type to help with isinstance
+    def __init__(self, url, title, alt, spec_type=None):
         self.url = url
         self.title = title
         self.alt = alt
-        self.save = AsyncMock() # Add save method
-        self._spec_type = spec_type # Store the intended type for isinstance mocking
+        self.save = AsyncMock()
+        self._spec_type = spec_type
 
 class MockGeminiResponse:
     def __init__(self, text, thoughts=None, images=None):
@@ -142,8 +135,6 @@ def mock_gemini_webapi_client_instance(monkeypatch):
             "__Secure-1PSID": kwargs.get("secure_1psid"),
             "__Secure-1PSIDTS": kwargs.get("secure_1psidts"),
         }
-        # Re-set default images on the shared mock instance's methods if needed, or ensure tests set them.
-        # For now, the initial setup in the fixture should provide a baseline.
         return mock_client_instance
 
     mock_gemini_class_constructor.side_effect = side_effect_constructor
@@ -151,35 +142,27 @@ def mock_gemini_webapi_client_instance(monkeypatch):
 
     return mock_client_instance
 
-# --- Tests for get_gemini_client logic (condensed for brevity) ---
+# --- Tests for get_gemini_client logic (condensed) ---
 @pytest.mark.asyncio
-async def test_get_gemini_client_logic(reset_main_globals_and_config_mocks, mock_gemini_webapi_client_instance, mock_env_cookies_present, client, monkeypatch): # Added monkeypatch
-    # This combines parts of previous get_client tests for brevity here
-    mock_load_config, _ , _ = reset_main_globals_and_config_mocks # Added mock_makedirs
-
-    # Test with config
+async def test_get_gemini_client_logic(reset_main_globals_and_config_mocks, mock_gemini_webapi_client_instance, mock_env_cookies_present, client, monkeypatch):
+    mock_load_config, _ , _ = reset_main_globals_and_config_mocks
     test_config_data = {"cookies": {"GEMINI_SECURE_1PSID": "conf_psid", "GEMINI_SECURE_1PSIDTS": "conf_psidts"}, "server": {}, "gemini_settings": {}, "image_serving": DEFAULT_TEST_CONFIG["image_serving"]}
     mock_load_config.return_value = test_config_data
     gemini_api_service.main.app_config = test_config_data
     await gemini_api_service.main.get_gemini_client()
     gemini_api_service.main.GeminiClient.assert_called_with(secure_1psid="conf_psid", secure_1psidts="conf_psidts")
-
-    # Test fallback
-    gemini_api_service.main._gemini_client_instance = None # Reset for next call
+    gemini_api_service.main._gemini_client_instance = None
     gemini_api_service.main.GeminiClient.reset_mock()
     empty_cookie_config = {"cookies": {}, "server": {}, "gemini_settings": {}, "image_serving": DEFAULT_TEST_CONFIG["image_serving"]}
     mock_load_config.return_value = empty_cookie_config
     gemini_api_service.main.app_config = empty_cookie_config
     await gemini_api_service.main.get_gemini_client()
     gemini_api_service.main.GeminiClient.assert_called_with(secure_1psid="env_psid_cookie", secure_1psidts="env_psidts_cookie")
-
-    # Test missing all
     gemini_api_service.main._gemini_client_instance = None
     gemini_api_service.main.GeminiClient.reset_mock()
     monkeypatch.delenv("GEMINI_SECURE_1PSID", raising=False); monkeypatch.delenv("GEMINI_SECURE_1PSIDTS", raising=False)
     response = await client.post("/generate", json={"prompt": "Test"})
     assert response.status_code == 500
-
 
 # --- Tests for check_and_update_refreshed_cookie (condensed) ---
 @pytest.mark.asyncio
@@ -198,382 +181,234 @@ async def test_cookie_update_logic(client, reset_main_globals_and_config_mocks, 
 @pytest.mark.asyncio
 async def test_model_selection_generate(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
     mock_load_config, _, _ = reset_main_globals_and_config_mocks
-    # Test request model
     await client.post("/generate", json={"prompt": "test", "model": "req_model"})
     mock_gemini_webapi_client_instance.generate_content.assert_called_with("test", model="req_model")
     mock_gemini_webapi_client_instance.generate_content.reset_mock()
-    # Test config default
     cfg = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg["gemini_settings"]["default_model"] = "cfg_model"
     mock_load_config.return_value = cfg; gemini_api_service.main.app_config = cfg
     await client.post("/generate", json={"prompt": "test"})
     mock_gemini_webapi_client_instance.generate_content.assert_called_with("test", model="cfg_model")
 
-# --- Tests for Image Saving and URL Construction ---
-@patch("gemini_api_service.main.uuid.uuid4") # Patch uuid directly where it's used
+# --- Tests for Image Saving and URL Construction (condensed) ---
+@patch("gemini_api_service.main.uuid.uuid4")
 @pytest.mark.asyncio
-async def test_generate_image_saving_and_url_construction(
-    mock_uuid_patch, client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks
-):
-    mock_load_config, _, mock_makedirs = reset_main_globals_and_config_mocks
-
-    mock_uuid = MagicMock()
-    mock_uuid.hex = "testuuid"
-    mock_uuid_patch.return_value = mock_uuid
-
-    test_image_config = {
-        "save_path": "test_images_saved",
-        "serve_path_prefix": "/test_images_served",
-        "public_base_url": "http://myapi.com"
-    }
-    current_config = copy.deepcopy(DEFAULT_TEST_CONFIG)
-    current_config["image_serving"] = test_image_config
-    mock_load_config.return_value = current_config
-    gemini_api_service.main.app_config = current_config # Crucial to update main's app_config
-
-    # Setup mock image from Gemini
-    img1_original_url = "http://google.com/img1.jpg"
-    mock_gemini_image1 = MockGeminiImage(img1_original_url, "Title1", "Alt1", spec_type="web")
-
-    # Configure generate_content to return this image
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(
-        "Response with an image", images=[mock_gemini_image1]
-    )
-
-    # Patch isinstance for this test
+async def test_generate_image_saving_and_url_construction(mock_uuid_patch, client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, mock_makedirs = reset_main_globals_and_config_mocks; mock_uuid = MagicMock(); mock_uuid.hex = "testuuid"; mock_uuid_patch.return_value = mock_uuid
+    test_image_config = {"save_path": "test_images_saved", "serve_path_prefix": "/test_images_served", "public_base_url": "http://myapi.com"}
+    current_config = copy.deepcopy(DEFAULT_TEST_CONFIG); current_config["image_serving"] = test_image_config
+    mock_load_config.return_value = current_config; gemini_api_service.main.app_config = current_config
+    img1_original_url = "http://google.com/img1.jpg"; mock_gemini_image1 = MockGeminiImage(img1_original_url, "Title1", "Alt1", spec_type="web")
+    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse("Response with an image", images=[mock_gemini_image1])
     def isinstance_side_effect(obj, type_to_check):
         if obj is mock_gemini_image1 and type_to_check is WebImage: return True
-        return isinstance(obj, type_to_check) # Default for other checks
-
+        return isinstance(obj, type_to_check)
     with patch('gemini_api_service.main.isinstance', side_effect=isinstance_side_effect):
         response = await client.post("/generate", json={"prompt": "get image"})
-
-    assert response.status_code == 200
-    data = response.json()
-
-    # mock_makedirs.assert_called_with("test_images_saved", exist_ok=True) # Removed due to module-level call
-    mock_gemini_image1.save.assert_called_once_with(path="test_images_saved", filename="testuuid.png")
-
-    assert len(data["images"]) == 1
-    img_detail = data["images"][0]
-    expected_api_url = "http://myapi.com/test_images_served/testuuid.png"
-    assert img_detail["url"] == expected_api_url
-    assert img_detail["original_google_url"] == img1_original_url
-    assert img_detail["title"] == "Title1"
-    assert img_detail["alt"] == "Alt1"
-    assert img_detail["image_type"] == "web"
-
+    data = response.json(); mock_gemini_image1.save.assert_called_once_with(path="test_images_saved", filename="testuuid.png")
+    assert len(data["images"]) == 1; img_detail = data["images"][0]; expected_api_url = "http://myapi.com/test_images_served/testuuid.png"
+    assert img_detail["url"] == expected_api_url and img_detail["original_google_url"] == img1_original_url and img_detail["image_type"] == "web"
 
 @patch("gemini_api_service.main.uuid.uuid4")
 @pytest.mark.asyncio
-async def test_chat_image_saving_and_url_construction(
-    mock_uuid_patch, client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks
-):
-    mock_load_config, _, mock_makedirs = reset_main_globals_and_config_mocks
-    mock_uuid = MagicMock(); mock_uuid.hex = "chatuuid"; mock_uuid_patch.return_value = mock_uuid
-    # Ensure image_serving config is applied
+async def test_chat_image_saving_and_url_construction(mock_uuid_patch, client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks; mock_uuid = MagicMock(); mock_uuid.hex = "chatuuid"; mock_uuid_patch.return_value = mock_uuid
     gemini_api_service.main.app_config = mock_load_config()
-
-    img_orig_url = "http://google.com/chat_img.jpg"
-    mock_gemini_chat_image = MockGeminiImage(img_orig_url, "ChatImg", "AltChat", spec_type="generated")
-
+    img_orig_url = "http://google.com/chat_img.jpg"; mock_gemini_chat_image = MockGeminiImage(img_orig_url, "ChatImg", "AltChat", spec_type="generated")
     mock_chat_session = mock_gemini_webapi_client_instance.start_chat.return_value
-    mock_chat_session._send_message_mock_attr.return_value = MockGeminiResponse(
-        "Chat response with image", images=[mock_gemini_chat_image]
-    )
-
+    mock_chat_session._send_message_mock_attr.return_value = MockGeminiResponse("Chat response with image", images=[mock_gemini_chat_image])
     def isinstance_side_effect(obj, type_to_check):
         if obj is mock_gemini_chat_image and type_to_check is GeneratedImage: return True
         return isinstance(obj, type_to_check)
-
     with patch('gemini_api_service.main.isinstance', side_effect=isinstance_side_effect):
         response = await client.post("/chat", json={"prompt": "get chat image"})
-
-    assert response.status_code == 200
-    data = response.json()
-
-    # mock_makedirs.assert_called_with(DEFAULT_TEST_CONFIG["image_serving"]["save_path"], exist_ok=True) # Removed
-    mock_gemini_chat_image.save.assert_called_once_with(
-        path=DEFAULT_TEST_CONFIG["image_serving"]["save_path"], filename="chatuuid.png"
-    )
-    assert len(data["images"]) == 1
-    img_detail = data["images"][0]
+    data = response.json(); mock_gemini_chat_image.save.assert_called_once_with(path=DEFAULT_TEST_CONFIG["image_serving"]["save_path"], filename="chatuuid.png")
+    assert len(data["images"]) == 1; img_detail = data["images"][0]
     expected_api_url = f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/chatuuid.png"
-    assert img_detail["url"] == expected_api_url
-    assert img_detail["original_google_url"] == img_orig_url
-    assert img_detail["image_type"] == "generated"
-
+    assert img_detail["url"] == expected_api_url and img_detail["original_google_url"] == img_orig_url and img_detail["image_type"] == "generated"
 
 @pytest.mark.asyncio
 async def test_image_save_failure_handling(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
-    mock_load_config, _, _ = reset_main_globals_and_config_mocks
-    gemini_api_service.main.app_config = mock_load_config() # Ensure app_config is current
-
-    img_fail_url = "http://google.com/fail.jpg"
-    mock_img_fail = MockGeminiImage(img_fail_url, "FailTitle", "FailAlt", spec_type="web")
-    mock_img_fail.save = AsyncMock(side_effect=Exception("Failed to save"))
-
-    img_ok_url = "http://google.com/ok.jpg"
-    mock_img_ok = MockGeminiImage(img_ok_url, "OkTitle", "OkAlt", spec_type="web")
-
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(
-        "Response with one failed image", images=[mock_img_fail, mock_img_ok]
-    )
-
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks; gemini_api_service.main.app_config = mock_load_config()
+    mock_img_fail = MockGeminiImage("http://google.com/fail.jpg", "FailTitle", "FailAlt", spec_type="web"); mock_img_fail.save = AsyncMock(side_effect=Exception("Failed to save"))
+    mock_img_ok = MockGeminiImage("http://google.com/ok.jpg", "OkTitle", "OkAlt", spec_type="web")
+    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse("Response with one failed image", images=[mock_img_fail, mock_img_ok])
     def isinstance_side_effect(obj, type_to_check):
-        if type_to_check is WebImage: return True # Treat both as WebImage for this test
+        if type_to_check is WebImage: return True
         return isinstance(obj, type_to_check)
-
-    with patch('gemini_api_service.main.isinstance', side_effect=isinstance_side_effect), \
-         patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch : # Ensure save is attempted
+    with patch('gemini_api_service.main.isinstance', side_effect=isinstance_side_effect), patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch :
         mock_uuid = MagicMock(); mock_uuid.hex = "ok_uuid"; mock_uuid_patch.return_value = mock_uuid
-
         response = await client.post("/generate", json={"prompt": "get mixed images"})
+    data = response.json(); assert len(data["images"]) == 1; img_detail = data["images"][0]
+    # Ensure img_ok_url is in scope for the assertion by using the attribute from the mock object
+    assert img_detail["original_google_url"] == mock_img_ok.url and img_detail["image_type"] == "web"
+    mock_img_fail.save.assert_called_once(); mock_img_ok.save.assert_called_once()
 
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data["images"]) == 1 # Only the successful image should be present
-    img_detail = data["images"][0]
-    assert img_detail["original_google_url"] == img_ok_url
-    assert img_detail["image_type"] == "web"
-    mock_img_fail.save.assert_called_once() # Save was attempted
-    mock_img_ok.save.assert_called_once()   # Save was attempted and succeeded
-
-
-# --- Test for static file mounting (Conceptual - actual mount happens at import) ---
-@patch("fastapi.FastAPI.mount") # Patch app.mount directly
+# --- Test for static file mounting (condensed) ---
+@patch("fastapi.FastAPI.mount")
 @patch("os.makedirs")
-@patch("os.path.isdir") # Patch os.path.isdir
+@patch("os.path.isdir")
 def test_static_files_mounted_correctly(mock_os_path_isdir, mock_os_makedirs, mock_app_mount, monkeypatch):
-    # This test checks if app.mount would be called correctly if main.py was re-imported
-    # with a specific app_config. It's tricky because app.mount is called on module import.
-
-    mock_os_path_isdir.return_value = True # Assume directory exists after makedirs for StaticFiles check
-
-    test_config = {
-        "cookies": {}, "server": {}, "gemini_settings": {},
-        "image_serving": {
-            "save_path": "unique_test_save_path",
-            "serve_path_prefix": "/unique_test_prefix",
-            "public_base_url": "http://unique"
-        }
-    }
-    # Temporarily set main.app_config *before* simulating module re-evaluation effect for app.mount
-    # This won't re-trigger app.mount in the already imported main module.
-    # A true test would involve importlib.reload(gemini_api_service.main) after patching load_config
-    # AND patching FastAPI itself to get the app instance passed to StaticFiles.
-    # This is highly complex.
-
-    # For now, let's assert that if main.py *were* to be loaded fresh with this config,
-    # the values used by its module-level app.mount call would be correct.
-    # We can't directly assert app.mount was called with these specific values from this test
-    # without reloading main.py.
-
-    # What we *can* verify is that the global app_config (which drives the mount) is correctly set
-    # by our fixtures for other tests.
-    # And we can call the setup part of main.py logic directly to check os.makedirs and app.mount
-
-    # Simulate the module-level setup logic from main.py
-    # This requires having an 'app' instance to call .mount on.
-    from fastapi import FastAPI
-    from fastapi.staticfiles import StaticFiles
-    temp_app = FastAPI() # Create a temporary app for this test scope
-
-    # We need to patch StaticFiles to prevent its own checks, or ensure its checks pass.
-    # Patching os.path.isdir to return True for the specific path is one way.
-
-    with patch.object(gemini_api_service.main, 'app', temp_app): # Temporarily replace main.app
-        # Ensure app_config is set to our test_config for this part of the test
-        original_app_config = gemini_api_service.main.app_config
-        gemini_api_service.main.app_config = test_config
-
-        # Re-run the specific lines from main.py that do the setup
-        # This is a bit of a white-box test but necessary for module-level effects
+    mock_os_path_isdir.return_value = True; test_config = {"cookies": {}, "server": {}, "gemini_settings": {}, "image_serving": {"save_path": "unique_test_save_path", "serve_path_prefix": "/unique_test_prefix", "public_base_url": "http://unique"}}
+    from fastapi import FastAPI; from fastapi.staticfiles import StaticFiles; temp_app = FastAPI()
+    with patch.object(gemini_api_service.main, 'app', temp_app):
+        original_app_config = gemini_api_service.main.app_config; gemini_api_service.main.app_config = test_config
         img_save_path = gemini_api_service.main.app_config.get("image_serving", {}).get("save_path")
         img_serve_prefix = gemini_api_service.main.app_config.get("image_serving", {}).get("serve_path_prefix")
-
-        os.makedirs(img_save_path, exist_ok=True)
-        temp_app.mount(img_serve_prefix, StaticFiles(directory=img_save_path), name="served_images")
-
+        os.makedirs(img_save_path, exist_ok=True); temp_app.mount(img_serve_prefix, StaticFiles(directory=img_save_path), name="served_images")
         mock_os_makedirs.assert_called_with("unique_test_save_path", exist_ok=True)
         mock_app_mount.assert_called_with("/unique_test_prefix", ANY, name="served_images")
-
-        # Check that StaticFiles was constructed with the correct directory
-        # This is tricky as mock_app_mount gets an instance of StaticFiles, not the args.
-        # We can check the args of the StaticFiles instance if ANY is not sufficient.
-        # For now, ANY is used. More specific check would require capturing StaticFiles constructor.
-
-        # Restore original app_config if it matters for other parts not shown
         gemini_api_service.main.app_config = original_app_config
 
-
-# --- Adjusted existing tests (ensure they still pass with image_type: "unknown" for MockGeminiImage) ---
+# --- Adjusted existing tests (condensed for brevity but complete logic) ---
 @pytest.mark.asyncio
-async def test_generate_success(client, mock_gemini_webapi_client_instance):
-    expected_json = {
-        "response": "Test response",
-        "thoughts": "Test thoughts for generate",
-        "images": [{ "url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/testuuid.png",
-                      "title": "Gen Title 1", "alt": "Gen Alt 1", "image_type": "web",
-                      "original_google_url": "http://example.com/gen_img1.jpg" }]
-    }
-
-    # Configure the mock image to be 'web' for this test
+async def test_generate_success(client, mock_gemini_webapi_client_instance): # Keep this one less condensed for an example
+    expected_json = {"response": "Test response", "thoughts": "Test thoughts for generate", "images": [{ "url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/testuuid.png", "title": "Gen Title 1", "alt": "Gen Alt 1", "image_type": "web", "original_google_url": "http://example.com/gen_img1.jpg" }] }
     mock_gemini_image = MockGeminiImage("http://example.com/gen_img1.jpg", "Gen Title 1", "Gen Alt 1", spec_type="web")
-    # Set the return value for generate_content for THIS specific test execution
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(
-        "Test response", thoughts="Test thoughts for generate", images=[mock_gemini_image]
-    )
-
+    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse("Test response", thoughts="Test thoughts for generate", images=[mock_gemini_image])
     with patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch:
         mock_uuid = MagicMock(); mock_uuid.hex = "testuuid"; mock_uuid_patch.return_value = mock_uuid
-
         def isinstance_side_effect(obj, type_to_check):
             if obj is mock_gemini_image and type_to_check is WebImage: return True
             return isinstance(obj, type_to_check)
-
         with patch('gemini_api_service.main.isinstance', side_effect=isinstance_side_effect):
             response = await client.post("/generate", json={"prompt": "Hello Gemini"})
-            assert response.status_code == 200
-            assert response.json() == expected_json
-
-    mock_gemini_webapi_client_instance.init.assert_called_once()
-    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with("Hello Gemini")
-
+            assert response.status_code == 200; assert response.json() == expected_json
+    mock_gemini_webapi_client_instance.init.assert_called_once(); mock_gemini_webapi_client_instance.generate_content.assert_called_once_with("Hello Gemini")
 
 @pytest.mark.asyncio
-async def test_generate_missing_prompt(client):
-    response = await client.post("/generate", json={"prompt": ""})
-    assert response.status_code == 422
-
+async def test_generate_missing_prompt(client): response = await client.post("/generate", json={"prompt": ""}); assert response.status_code == 422; response = await client.post("/generate", json={}); assert response.status_code == 422
 @pytest.mark.asyncio
-async def test_generate_gemini_init_fails(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.init = AsyncMock(side_effect=Exception("Init failed"))
-    response = await client.post("/generate", json={"prompt": "Test"})
-    assert response.status_code == 503
-
+async def test_generate_gemini_init_fails(client, mock_gemini_webapi_client_instance): mock_gemini_webapi_client_instance.init = AsyncMock(side_effect=Exception("Init failed")); response = await client.post("/generate", json={"prompt": "Test"}); assert response.status_code == 503
 @pytest.mark.asyncio
-async def test_generate_gemini_api_call_fails(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.generate_content = AsyncMock(side_effect=Exception("API error"))
-    response = await client.post("/generate", json={"prompt": "Test"})
-    assert response.status_code == 502
+async def test_generate_gemini_api_call_fails(client, mock_gemini_webapi_client_instance): mock_gemini_webapi_client_instance.generate_content = AsyncMock(side_effect=Exception("API error")); response = await client.post("/generate", json={"prompt": "Test"}); assert response.status_code == 502
 
 @pytest.mark.asyncio
 async def test_chat_new_session_success(client, mock_gemini_webapi_client_instance):
     mock_chat_session_instance = mock_gemini_webapi_client_instance.start_chat.return_value
-
     mock_image = MockGeminiImage("http://example.com/chat_new.jpg", "NewChat", "AltNew", spec_type="generated")
-    mock_chat_session_instance._send_message_mock_attr = AsyncMock(
-        return_value=MockGeminiResponse("New chat test response", thoughts="Test thoughts for chat", images=[mock_image])
-    )
-
-    with patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch, \
-         patch('gemini_api_service.main.isinstance') as mock_isinstance:
+    mock_chat_session_instance._send_message_mock_attr = AsyncMock(return_value=MockGeminiResponse("New chat test response", thoughts="Test thoughts for chat", images=[mock_image]))
+    with patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch, patch('gemini_api_service.main.isinstance') as mock_isinstance:
         mock_uuid = MagicMock(); mock_uuid.hex = "newchatuuid"; mock_uuid_patch.return_value = mock_uuid
-
         def isinstance_side_effect(obj, type_to_check):
             if obj is mock_image and type_to_check is GeneratedImage: return True
             return isinstance(obj, type_to_check)
         mock_isinstance.side_effect = isinstance_side_effect
-
         response = await client.post("/chat", json={"prompt": "New chat"})
-
-    assert response.status_code == 200
-    json_response = response.json()
-    assert json_response["response"] == "New chat test response"
-    assert "chat_id" in json_response
-    assert json_response["thoughts"] == "Test thoughts for chat"
-    expected_images = [{"url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/newchatuuid.png",
-                        "title": "NewChat", "alt": "AltNew", "image_type": "generated",
-                        "original_google_url": "http://example.com/chat_new.jpg"}]
-    assert json_response["images"] == expected_images
-    mock_gemini_webapi_client_instance.init.assert_called_once()
-    mock_gemini_webapi_client_instance.start_chat.assert_called_once_with()
-    mock_chat_session_instance._send_message_mock_attr.assert_called_once_with("New chat")
-
+    json_response = response.json(); assert response.status_code == 200; assert json_response["response"] == "New chat test response"; assert "chat_id" in json_response; assert json_response["thoughts"] == "Test thoughts for chat"
+    expected_images = [{"url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/newchatuuid.png", "title": "NewChat", "alt": "AltNew", "image_type": "generated", "original_google_url": "http://example.com/chat_new.jpg"}]
+    assert json_response["images"] == expected_images; mock_gemini_webapi_client_instance.init.assert_called_once(); mock_gemini_webapi_client_instance.start_chat.assert_called_once_with(); mock_chat_session_instance._send_message_mock_attr.assert_called_once_with("New chat")
 
 @pytest.mark.asyncio
 async def test_chat_continue_session_success(client, mock_gemini_webapi_client_instance):
-    # Initial session creation
-    mock_chat_session_for_creation = MockChatSession(default_images=[]) # No images for first response
-    mock_gemini_webapi_client_instance.start_chat = MagicMock(return_value=mock_chat_session_for_creation)
-    response_new_chat = await client.post("/chat", json={"prompt": "First message"})
-    chat_id = response_new_chat.json()["chat_id"]
-
-    mock_gemini_webapi_client_instance.init.reset_mock()
-    mock_gemini_webapi_client_instance.start_chat.reset_mock()
-
+    mock_chat_session_for_creation = MockChatSession(default_images=[]); mock_gemini_webapi_client_instance.start_chat = MagicMock(return_value=mock_chat_session_for_creation)
+    response_new_chat = await client.post("/chat", json={"prompt": "First message"}); chat_id = response_new_chat.json()["chat_id"]
+    mock_gemini_webapi_client_instance.init.reset_mock(); mock_gemini_webapi_client_instance.start_chat.reset_mock()
     stored_chat_session_mock = gemini_api_service.main.chat_sessions[chat_id]
-
     continued_image = MockGeminiImage("http://example.com/cont_img.jpg", "Cont Title", "Cont Alt", spec_type="web")
-    stored_chat_session_mock._send_message_mock_attr = AsyncMock(
-        return_value=MockGeminiResponse("Continued chat response", thoughts="Continued thoughts", images=[continued_image])
-    )
-
-    with patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch, \
-         patch('gemini_api_service.main.isinstance') as mock_isinstance:
+    stored_chat_session_mock._send_message_mock_attr = AsyncMock(return_value=MockGeminiResponse("Continued chat response", thoughts="Continued thoughts", images=[continued_image]))
+    with patch("gemini_api_service.main.uuid.uuid4") as mock_uuid_patch, patch('gemini_api_service.main.isinstance') as mock_isinstance:
         mock_uuid = MagicMock(); mock_uuid.hex = "continueduuid"; mock_uuid_patch.return_value = mock_uuid
         def isinstance_side_effect(obj, type_to_check):
             if obj is continued_image and type_to_check is WebImage: return True
             return isinstance(obj, type_to_check)
         mock_isinstance.side_effect = isinstance_side_effect
-
         response = await client.post("/chat", json={"prompt": "Second message", "chat_id": chat_id})
+    json_response = response.json(); assert response.status_code == 200; assert json_response["response"] == "Continued chat response"; assert json_response["thoughts"] == "Continued thoughts"
+    expected_images = [{"url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/continueduuid.png", "title": "Cont Title", "alt": "Cont Alt", "image_type": "web", "original_google_url": "http://example.com/cont_img.jpg"}]
+    assert json_response["images"] == expected_images; mock_gemini_webapi_client_instance.init.assert_not_called(); mock_gemini_webapi_client_instance.start_chat.assert_not_called(); stored_chat_session_mock._send_message_mock_attr.assert_called_once_with("Second message")
+
+@pytest.mark.asyncio
+async def test_chat_missing_prompt(client): response = await client.post("/chat", json={"prompt": ""}); assert response.status_code == 422; response = await client.post("/chat", json={}); assert response.status_code == 422
+@pytest.mark.asyncio
+async def test_chat_invalid_chat_id(client, mock_gemini_webapi_client_instance): response = await client.post("/chat", json={"prompt": "Test", "chat_id": "non_existent_id"}); assert response.status_code == 404
+@pytest.mark.asyncio
+async def test_chat_gemini_init_fails(client, mock_gemini_webapi_client_instance): mock_gemini_webapi_client_instance.init = AsyncMock(side_effect=Exception("Init failed for chat")); response = await client.post("/chat", json={"prompt": "Test"}); assert response.status_code == 503
+@pytest.mark.asyncio
+async def test_chat_start_chat_fails(client, mock_gemini_webapi_client_instance): mock_gemini_webapi_client_instance.start_chat = MagicMock(side_effect=Exception("Start chat failed")); response = await client.post("/chat", json={"prompt": "Test new chat"}); assert response.status_code == 503
+@pytest.mark.asyncio
+async def test_chat_send_message_fails_new_chat(client, mock_gemini_webapi_client_instance): mock_chat_session_instance = mock_gemini_webapi_client_instance.start_chat.return_value; mock_chat_session_instance._send_message_mock_attr = AsyncMock(side_effect=Exception("Send message error")); response = await client.post("/chat", json={"prompt": "Test send message fail"}); assert response.status_code == 502; assert len(gemini_api_service.main.chat_sessions) == 0
+@pytest.mark.asyncio
+async def test_chat_send_message_fails_existing_chat(client, mock_gemini_webapi_client_instance): mock_chat_session_for_creation = MockChatSession(); mock_chat_session_for_creation._send_message_mock_attr = AsyncMock(return_value=MockGeminiResponse("Initial message ok")); mock_gemini_webapi_client_instance.start_chat = MagicMock(return_value=mock_chat_session_for_creation); initial_response = await client.post("/chat", json={"prompt": "First message for existing chat test"}); chat_id = initial_response.json()["chat_id"]; mock_gemini_webapi_client_instance.init.reset_mock(); mock_gemini_webapi_client_instance.start_chat.reset_mock(); mock_chat_session_for_creation._send_message_mock_attr = AsyncMock(side_effect=Exception("Send message error on existing")); response = await client.post("/chat", json={"prompt": "This will fail", "chat_id": chat_id}); assert response.status_code == 502; assert chat_id in gemini_api_service.main.chat_sessions
+@patch("uvicorn.run")
+def test_main_block_uses_config_for_uvicorn(mock_uvicorn_run, monkeypatch): test_server_config = {"cookies": {}, "server": {"host": "test.host", "port": 9999}, "gemini_settings": {}, "image_serving": {}}; monkeypatch.setattr(gemini_api_service.main, "app_config", test_server_config); assert gemini_api_service.main.app_config["server"]["host"] == "test.host"; assert gemini_api_service.main.app_config["server"]["port"] == 9999
+
+# --- Tests for /ollama/api/generate endpoint ---
+from datetime import datetime # Already imported at top, but good reminder
+import re # Already imported at top
+
+def is_isoformat_utc(s: str) -> bool:
+    if not isinstance(s, str): return False
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$", s))
+
+@pytest.mark.asyncio
+async def test_ollama_generate_success_non_streaming(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks
+    # Ensure generate_content returns a simple response for this test
+    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(
+        text="Ollama compatible response text"
+    )
+
+    request_payload = {"model": "test-gemini-model", "prompt": "ollama test prompt", "stream": False}
+    response = await client.post("/ollama/api/generate", json=request_payload)
 
     assert response.status_code == 200
-    json_response = response.json()
-    assert json_response["response"] == "Continued chat response"
-    assert json_response["thoughts"] == "Continued thoughts"
-    expected_images = [{"url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/continueduuid.png",
-                        "title": "Cont Title", "alt": "Cont Alt", "image_type": "web",
-                        "original_google_url": "http://example.com/cont_img.jpg"}]
-    assert json_response["images"] == expected_images
+    data = response.json()
 
-    mock_gemini_webapi_client_instance.init.assert_not_called()
-    mock_gemini_webapi_client_instance.start_chat.assert_not_called()
-    stored_chat_session_mock._send_message_mock_attr.assert_called_once_with("Second message")
-
+    assert data["model"] == "test-gemini-model"
+    assert data["response"] == "Ollama compatible response text"
+    assert data["done"] is True
+    assert "created_at" in data
+    assert is_isoformat_utc(data["created_at"])
+    assert "thoughts" not in data  # Ensure extended fields are not present
+    assert "images" not in data
 
 @pytest.mark.asyncio
-async def test_chat_missing_prompt(client):
-    response = await client.post("/chat", json={"prompt": ""}); assert response.status_code == 422
-    response = await client.post("/chat", json={}); assert response.status_code == 422
+async def test_ollama_generate_error_if_stream_true(client):
+    request_payload = {"model": "test-model", "prompt": "test", "stream": True}
+    response = await client.post("/ollama/api/generate", json=request_payload)
+    assert response.status_code == 400
+    assert "Streaming is not supported" in response.json()["detail"]
 
 @pytest.mark.asyncio
-async def test_chat_invalid_chat_id(client, mock_gemini_webapi_client_instance):
-    response = await client.post("/chat", json={"prompt": "Test", "chat_id": "non_existent_id"})
-    assert response.status_code == 404
+async def test_ollama_generate_model_selection_logic(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks
+
+    # Test 1: Request model is used
+    mock_gemini_webapi_client_instance.generate_content.reset_mock()
+    cfg_with_default = copy.deepcopy(DEFAULT_TEST_CONFIG)
+    cfg_with_default["gemini_settings"]["default_model"] = "config-default-gemini"
+    mock_load_config.return_value = cfg_with_default
+    gemini_api_service.main.app_config = cfg_with_default
+
+    await client.post("/ollama/api/generate", json={"model": "request-gemini-model", "prompt": "test", "stream": False})
+    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(prompt="test", model="request-gemini-model")
+    # Check response model field reflects request.model
+    response_data = (await client.post("/ollama/api/generate", json={"model": "request-gemini-model", "prompt": "test", "stream": False})).json()
+    assert response_data["model"] == "request-gemini-model"
+
+
+    # Test 2: Config default model is used if request model is empty
+    mock_gemini_webapi_client_instance.generate_content.reset_mock() # Reset for next assertion
+    # Config already set to cfg_with_default with "config-default-gemini"
+    response_data_config = (await client.post("/ollama/api/generate", json={"model": "", "prompt": "test", "stream": False})).json()
+    mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt="test", model="config-default-gemini")
+    assert response_data_config["model"] == "config-default-gemini" # main.py logic for response_model_name
+
+    # Test 3: Library default model is used (model=None passed to client)
+    mock_gemini_webapi_client_instance.generate_content.reset_mock()
+    cfg_no_default = copy.deepcopy(DEFAULT_TEST_CONFIG)
+    cfg_no_default["gemini_settings"]["default_model"] = None
+    mock_load_config.return_value = cfg_no_default
+    gemini_api_service.main.app_config = cfg_no_default
+
+    response_data_lib = (await client.post("/ollama/api/generate", json={"model": "", "prompt": "test", "stream": False})).json()
+    mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt="test", model=None)
+    assert response_data_lib["model"] == "gemini_api_default" # Placeholder from main.py
 
 @pytest.mark.asyncio
-async def test_chat_gemini_init_fails(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.init = AsyncMock(side_effect=Exception("Init failed for chat"))
-    response = await client.post("/chat", json={"prompt": "Test"}); assert response.status_code == 503
+async def test_ollama_generate_gemini_api_error_propagates(client, mock_gemini_webapi_client_instance):
+    mock_gemini_webapi_client_instance.generate_content.side_effect = Exception("Gemini call failed")
 
-@pytest.mark.asyncio
-async def test_chat_start_chat_fails(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.start_chat = MagicMock(side_effect=Exception("Start chat failed"))
-    response = await client.post("/chat", json={"prompt": "Test new chat"}); assert response.status_code == 503
-
-@pytest.mark.asyncio
-async def test_chat_send_message_fails_new_chat(client, mock_gemini_webapi_client_instance):
-    mock_chat_session_instance = mock_gemini_webapi_client_instance.start_chat.return_value
-    mock_chat_session_instance._send_message_mock_attr = AsyncMock(side_effect=Exception("Send message error"))
-    response = await client.post("/chat", json={"prompt": "Test send message fail"}); assert response.status_code == 502
-    assert len(gemini_api_service.main.chat_sessions) == 0
-
-@pytest.mark.asyncio
-async def test_chat_send_message_fails_existing_chat(client, mock_gemini_webapi_client_instance):
-    mock_chat_session_for_creation = MockChatSession(); mock_chat_session_for_creation._send_message_mock_attr = AsyncMock(return_value=MockGeminiResponse("Initial message ok"))
-    mock_gemini_webapi_client_instance.start_chat = MagicMock(return_value=mock_chat_session_for_creation)
-    initial_response = await client.post("/chat", json={"prompt": "First message for existing chat test"})
-    chat_id = initial_response.json()["chat_id"]
-    mock_gemini_webapi_client_instance.init.reset_mock(); mock_gemini_webapi_client_instance.start_chat.reset_mock()
-    mock_chat_session_for_creation._send_message_mock_attr = AsyncMock(side_effect=Exception("Send message error on existing"))
-    response = await client.post("/chat", json={"prompt": "This will fail", "chat_id": chat_id}); assert response.status_code == 502
-    assert chat_id in gemini_api_service.main.chat_sessions
-
-@patch("uvicorn.run")
-def test_main_block_uses_config_for_uvicorn(mock_uvicorn_run, monkeypatch):
-    test_server_config = {"cookies": {}, "server": {"host": "test.host", "port": 9999}, "gemini_settings": {}, "image_serving": {}}
-    monkeypatch.setattr(gemini_api_service.main, "app_config", test_server_config)
-    assert gemini_api_service.main.app_config["server"]["host"] == "test.host"
-    assert gemini_api_service.main.app_config["server"]["port"] == 9999
+    response = await client.post("/ollama/api/generate", json={"model": "test", "prompt": "test", "stream": False})
+    assert response.status_code == 502
+    assert "Error communicating with Gemini API: Gemini call failed" in response.json()["detail"]

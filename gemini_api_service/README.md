@@ -100,6 +100,8 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
 
 ## API Endpoints
 
+This section details the custom API endpoints provided by this service. For Ollama-compatible endpoints, see the "Ollama API Compatibility" section.
+
 ### 1. Generate Content (Single-turn)
 
 *   **Endpoint:** `POST /generate`
@@ -223,6 +225,46 @@ This configuration system, especially the auto-updating `GEMINI_SECURE_1PSIDTS`,
         "images": null
     }
     ```
+
+## Ollama API Compatibility
+
+This service offers experimental endpoints designed to mimic parts of the Ollama API. This allows for easier integration with existing tools and clients that are compatible with Ollama.
+
+**Note**: These compatible endpoints aim for basic functionality. They may not support all features available in the native Gemini API or this service's custom endpoints (e.g., `thoughts` and `images` are not returned by the Ollama-compatible `/generate` endpoint).
+
+### 1. Generate Completion (Ollama-Compatible)
+
+*   **Endpoint:** `POST /ollama/api/generate`
+*   **Description:** Provides a non-streaming equivalent to Ollama's `/api/generate` endpoint, powered by Gemini.
+*   **Request Body (`OllamaGenerateRequest`)**:
+    - `model` (string, required): The model name. While you can provide any string (e.g., "llama2", "mistral", "gemini-2.5-pro"), the service will attempt to use this model with the Gemini backend. If the exact name isn't recognized or directly usable by Gemini, or if left empty/null, the service's `default_model` from `config.json` (under `gemini_settings`) will be used. If neither is suitable, the `gemini_webapi` library's own default model is used.
+    - `prompt` (string, required): The text prompt.
+    - `stream` (boolean, optional, default: `false`): Set to `false` for a non-streaming response. This endpoint **only supports `stream: false`**. Requests with `stream: true` will result in an error.
+*   **Example Request (curl):**
+    ```bash
+    curl -X POST "http://localhost:8000/ollama/api/generate" \
+         -H "Content-Type: application/json" \
+         -d '{
+               "model": "gemini-2.5-pro",
+               "prompt": "Why is the sky blue?",
+               "stream": false
+             }'
+    ```
+*   **Response Body (`OllamaGenerateResponse`)**:
+    - `model` (string): The model name that was requested or used as a fallback.
+    - `created_at` (string): Timestamp of response generation in ISO 8601 format (UTC).
+    - `response` (string): The text response from the Gemini model.
+    - `done` (boolean): Always `true` for this non-streaming endpoint.
+*   **Example Response**:
+    ```json
+    {
+        "model": "gemini-2.5-pro",
+        "created_at": "2023-10-26T12:34:56.123456Z",
+        "response": "The sky is blue due to a phenomenon called Rayleigh scattering...",
+        "done": true
+    }
+    ```
+*   **Note on Features**: This endpoint provides a basic text response compatible with Ollama's non-streaming generate API. Features like `thoughts` and `images` available in this service's custom `/generate` endpoint are **not** included in this Ollama-compatible response.
 
 ## Error Handling
 
