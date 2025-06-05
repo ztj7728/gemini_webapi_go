@@ -7,12 +7,16 @@ import copy
 import uuid
 from datetime import datetime
 import re
+import json # Added for json.dumps/loads
 
 import httpx
 from httpx import ASGITransport
 
 import gemini_api_service.main
 from gemini_webapi import WebImage, GeneratedImage
+# Assuming OllamaChatMessage is available for constructing test payloads easily
+# If not, raw dicts will be used for request_payloads.
+from gemini_api_service.main import OllamaChatMessage
 
 
 DEFAULT_TEST_CONFIG = {
@@ -312,11 +316,17 @@ async def test_ollama_chat_success_non_streaming(client, mock_gemini_webapi_clie
     assert data.get("context") is None; assert data.get("total_duration") == 0; assert data.get("load_duration") == 0; assert data.get("prompt_eval_count") == 0; assert data.get("prompt_eval_duration") == 0; assert data.get("eval_count") == 0; assert data.get("eval_duration") == 0
 
     # Verify generate_content call arguments
-    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(
-        prompt="User: Hello from Ollama chat",
-        model="test-gemini-chat-model",
-        system_instruction=None
-    )
+    called_with_args = mock_gemini_webapi_client_instance.generate_content.call_args
+    assert called_with_args is not None
+    # Check positional arguments (none expected for prompt, model, system_instruction)
+    # Check keyword arguments
+    assert "system_instruction" not in called_with_args.kwargs
+    assert called_with_args.kwargs["model"] == "test-gemini-chat-model"
+
+    expected_messages_as_dicts = [{"role": "user", "content": "Hello from Ollama chat"}]
+    assert json.loads(called_with_args.kwargs["prompt"]) == expected_messages_as_dicts
+
+    mock_gemini_webapi_client_instance.generate_content.assert_called_once() # Simpler way to check it was called once with expected named args
 
 @pytest.mark.asyncio
 async def test_ollama_chat_error_if_stream_true(client): # Does not need mock_gemini_webapi_client_instance if error is raised before client call
@@ -328,106 +338,94 @@ async def test_ollama_chat_error_if_stream_true(client): # Does not need mock_ge
 async def test_ollama_chat_model_selection_logic(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
     mock_load_config, _, _ = reset_main_globals_and_config_mocks
 
+    mock_payload_messages = [{"role": "user", "content": "test"}]
+    expected_json_prompt = json.dumps(mock_payload_messages)
+
     # Case 1: Model in request
     mock_gemini_webapi_client_instance.generate_content.reset_mock()
     gemini_api_service.main.app_config = mock_load_config() # Ensure default config
-    await client.post("/ollama/api/chat", json={"model": "request-gemini-model", "messages": [{"role": "user", "content": "test"}], "stream": False})
-    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(prompt="User: test", model="request-gemini-model", system_instruction=None)
-    response_data = (await client.post("/ollama/api/chat", json={"model": "request-gemini-model", "messages": [{"role": "user", "content": "test"}], "stream": False})).json()
+    await client.post("/ollama/api/chat", json={"model": "request-gemini-model", "messages": mock_payload_messages, "stream": False})
+    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(prompt=expected_json_prompt, model="request-gemini-model")
+    response_data = (await client.post("/ollama/api/chat", json={"model": "request-gemini-model", "messages": mock_payload_messages, "stream": False})).json()
     assert response_data["model"] == "request-gemini-model"
 
     # Case 2: Model from config default
     mock_gemini_webapi_client_instance.generate_content.reset_mock()
     cfg_with_default = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg_with_default["gemini_settings"]["default_model"] = "config-default-gemini"
     mock_load_config.return_value = cfg_with_default; gemini_api_service.main.app_config = cfg_with_default
-    response_data_config = (await client.post("/ollama/api/chat", json={"model": "", "messages": [{"role": "user", "content": "test"}], "stream": False})).json()
-    mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt="User: test", model="config-default-gemini", system_instruction=None)
+    response_data_config = (await client.post("/ollama/api/chat", json={"model": "", "messages": mock_payload_messages, "stream": False})).json()
+    mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt=expected_json_prompt, model="config-default-gemini")
     assert response_data_config["model"] == "config-default-gemini"
 
     # Case 3: Model from library default (config default is None)
     mock_gemini_webapi_client_instance.generate_content.reset_mock()
     cfg_no_default = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg_no_default["gemini_settings"]["default_model"] = None
     mock_load_config.return_value = cfg_no_default; gemini_api_service.main.app_config = cfg_no_default
-    response_data_lib = (await client.post("/ollama/api/chat", json={"model": "", "messages": [{"role": "user", "content": "test"}], "stream": False})).json()
-    mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt="User: test", model=None, system_instruction=None)
+    response_data_lib = (await client.post("/ollama/api/chat", json={"model": "", "messages": mock_payload_messages, "stream": False})).json()
+    mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt=expected_json_prompt, model=None)
     assert response_data_lib["model"] == "gemini_api_default"
 
 @pytest.mark.asyncio
 async def test_ollama_chat_api_error_generate_content(client, mock_gemini_webapi_client_instance): # Consolidated error test
     mock_gemini_webapi_client_instance.generate_content.side_effect = Exception("Gemini call failed")
-    response = await client.post("/ollama/api/chat", json={"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": False})
+    response = await client.post("/ollama/api/chat", json={"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": False}) # messages needs to be non-empty
     assert response.status_code == 502; assert "Error communicating with Gemini API: Gemini call failed" in response.json()["detail"]
 
 @pytest.mark.asyncio
-async def test_ollama_chat_message_processing_order_and_response(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(text="Response to second")
-    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "This is the first user message"}, {"role": "assistant", "content": "Assistant history message"}, {"role": "user", "content": "This is the second user message"}]
-    request_payload = {"model": "test-model", "messages": messages, "stream": False}
-    response = await client.post("/ollama/api/chat", json=request_payload)
-    assert response.status_code == 200; data = response.json(); assert data["message"]["content"] == "Response to second"
-    expected_formatted_prompt = "User: This is the first user message\n\nAssistant: Assistant history message\n\nUser: This is the second user message"
-    expected_system_instruction = "System prompt"
-    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(prompt=expected_formatted_prompt, model=ANY, system_instruction=expected_system_instruction)
-
-@pytest.mark.asyncio
-async def test_ollama_chat_error_if_no_user_or_system_messages(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+async def test_ollama_chat_error_if_messages_empty(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
     mock_load_config, _, _ = reset_main_globals_and_config_mocks
     gemini_api_service.main.app_config = mock_load_config()
 
-    # Test case 1: Empty messages list
-    # Note: Pydantic might catch this if OllamaChatRequest.messages is defined as NonEmptyList.
-    # If it's List[OllamaChatMessage], then our internal check is tested.
-    # Assuming List[OllamaChatMessage] for now, so the main.py check is active.
     request_payload_empty = {"model": "test-model", "messages": [], "stream": False}
     response_empty = await client.post("/ollama/api/chat", json=request_payload_empty)
     assert response_empty.status_code == 400
-    # The detail message comes from `if not request.messages:` in main.py
-    assert "Messages list cannot be empty" in response_empty.json()["detail"]
-
-    # Test case 2: Messages that result in empty formatted_prompt_str and empty system_instruction_str
-    # e.g. only assistant messages, or user/system messages with empty content
-    request_payload_assistant_only = {"model": "test-model", "messages": [{"role": "assistant", "content": "I said something"}], "stream": False}
-    response_assistant_only = await client.post("/ollama/api/chat", json=request_payload_assistant_only)
-    assert response_assistant_only.status_code == 400
-    assert "Received empty or invalid message content. At least one user, assistant, or system message is required." in response_assistant_only.json()["detail"]
-
-    request_payload_user_empty_content = {"model": "test-model", "messages": [{"role": "user", "content": ""}], "stream": False}
-    response_user_empty_content = await client.post("/ollama/api/chat", json=request_payload_user_empty_content)
-    assert response_user_empty_content.status_code == 400
-    assert "Received empty or invalid message content. At least one user, assistant, or system message is required." in response_user_empty_content.json()["detail"]
+    assert "The 'messages' array cannot be empty." in response_empty.json()["detail"]
 
 @pytest.mark.asyncio
-async def test_ollama_chat_system_prompt_only(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(text="Response to system only")
-    messages = [{"role": "system", "content": "System prompt only"}]
-    request_payload = {"model": "test-model", "messages": messages, "stream": False}
-    response = await client.post("/ollama/api/chat", json=request_payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["message"]["content"] == "Response to system only"
-    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(
-        prompt="System prompt only", model="test-model", system_instruction=None
-    )
+async def test_ollama_chat_messages_correctly_json_stringified_as_prompt(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks
+    gemini_api_service.main.app_config = mock_load_config() # Ensure default config
 
-@pytest.mark.asyncio
-async def test_ollama_chat_multiple_system_prompts(client, mock_gemini_webapi_client_instance):
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(text="Response to multiple system prompts")
-    messages = [
-        {"role": "system", "content": "System prompt 1."},
-        {"role": "user", "content": "User message."},
-        {"role": "system", "content": "System prompt 2."} # System prompts are typically first, but testing collection
+    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(text="JSON prompt processed")
+
+    # Using OllamaChatMessage for constructing Pydantic models if available and used in main.py for `request.messages`
+    # Otherwise, raw dicts are fine if main.py's OllamaChatRequest.messages are just List[dict]
+    # For this test, we assume OllamaChatMessage is the type of items in request.messages
+
+    # Test with a mix of roles
+    sample_messages_pydantic = [
+        OllamaChatMessage(role="system", content="You are a helpful pirate."),
+        OllamaChatMessage(role="user", content="Ahoy! Where's the treasure?"),
+        OllamaChatMessage(role="assistant", content="Arrr, it be buried on Skull Island!"),
+        OllamaChatMessage(role="user", content="Is it X marks the spot?")
     ]
-    request_payload = {"model": "test-model", "messages": messages, "stream": False}
+    # Convert to list of dicts as they would be in the request payload
+    sample_messages_for_payload = [msg.model_dump(exclude_none=True) for msg in sample_messages_pydantic]
+
+    request_payload = {
+        "model": "test-json-model",
+        "messages": sample_messages_for_payload,
+        "stream": False
+    }
+
     response = await client.post("/ollama/api/chat", json=request_payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["message"]["content"] == "Response to multiple system prompts"
+    assert data["message"]["content"] == "JSON prompt processed"
 
-    expected_system_instruction = "System prompt 1.\nSystem prompt 2."
-    expected_formatted_prompt = "User: User message."
+    # Verify generate_content call arguments
+    called_with_args = mock_gemini_webapi_client_instance.generate_content.call_args
+    assert called_with_args is not None
+    assert "system_instruction" not in called_with_args.kwargs # No separate system_instruction
+    assert called_with_args.kwargs["model"] == "test-json-model"
 
-    mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(
-        prompt=expected_formatted_prompt,
-        model="test-model",
-        system_instruction=expected_system_instruction
-    )
+    # The prompt should be the JSON string of messages_as_dicts
+    # This is what main.py's `json.dumps(messages_as_dicts)` would produce
+    # where messages_as_dicts = [msg.model_dump(exclude_none=True) for msg in request.messages]
+
+    # We need to compare the content of the JSON string
+    # `sample_messages_for_payload` is already a list of dicts, so this is what json.dumps() in main.py will use
+    expected_json_prompt_content = sample_messages_for_payload
+
+    assert json.loads(called_with_args.kwargs["prompt"]) == expected_json_prompt_content
+    mock_gemini_webapi_client_instance.generate_content.assert_called_once()

@@ -2,6 +2,7 @@ import os
 import uuid # Added for unique chat IDs
 import asyncio # Added for asyncio.Lock
 import sys # Added for sys.stderr
+import json # Added for json.dumps
 from typing import Optional, List # Added List for List[ImageDetail]
 from datetime import datetime # Added for ISO 8601 timestamp
 
@@ -177,39 +178,24 @@ async def ollama_chat_completion(request: OllamaChatRequest):
         config_default_model = app_config.get("gemini_settings", {}).get("default_model")
         if config_default_model and isinstance(config_default_model, str) and config_default_model.strip():
             model_to_use_for_gemini = config_default_model
-    system_instruction_parts = []
-    prompt_parts = []
 
-    if not request.messages: # Should be caught by Pydantic if messages is non-optional and non-empty
-        raise HTTPException(status_code=400, detail="Messages list cannot be empty.")
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="The 'messages' array cannot be empty.")
 
-    for message in request.messages:
-        if message.role.lower() == "system":
-            system_instruction_parts.append(message.content)
-        elif message.role.lower() == "user":
-            prompt_parts.append(f"User: {message.content}")
-        elif message.role.lower() == "assistant":
-            prompt_parts.append(f"Assistant: {message.content}")
-        # Other roles are ignored as per current Ollama spec (usually user, assistant, system)
-
-    system_instruction_str = "\n".join(system_instruction_parts) if system_instruction_parts else None
-    formatted_prompt_str = "\n\n".join(prompt_parts)
-
-    if not formatted_prompt_str and not system_instruction_str:
-        raise HTTPException(status_code=400, detail="Received empty or invalid message content. At least one user, assistant, or system message is required.")
-
-    # If only system prompt is available, use it as the main prompt,
-    # and clear system_instruction_str to avoid redundancy or API error with some backends.
-    if not formatted_prompt_str and system_instruction_str:
-        formatted_prompt_str = system_instruction_str
-        system_instruction_str = None
+    try:
+        # For Pydantic models, model_dump() is preferred if available (Pydantic v2).
+        messages_as_dicts = [msg.model_dump(exclude_none=True) for msg in request.messages]
+        json_string_prompt = json.dumps(messages_as_dicts)
+    except AttributeError: # Fallback for older Pydantic or if model_dump isn't there
+        messages_as_dicts = [dict(msg) for msg in request.messages]
+        json_string_prompt = json.dumps(messages_as_dicts)
 
     gemini_final_response_text = ""
     try:
         gemini_response = await client.generate_content(
-            prompt=formatted_prompt_str,
-            model=model_to_use_for_gemini,
-            system_instruction=system_instruction_str
+            prompt=json_string_prompt, # Pass the JSON string as the prompt
+            model=model_to_use_for_gemini
+            # NO system_instruction parameter
         )
         gemini_final_response_text = gemini_response.text
 

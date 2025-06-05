@@ -283,13 +283,13 @@ This service offers experimental endpoints designed to mimic parts of the Ollama
 ### 2. Chat Completions (Ollama-Compatible)
 
 *   **Endpoint:** `POST /ollama/api/chat`
-*   **Description:** Processes chat messages for the Gemini model. This endpoint is stateless. To provide conversation history, include all relevant past messages in the `messages` array. The service will format the `messages` array into a single prompt string that is passed to Gemini's content generation capability. Messages with `role: "system"` will be extracted and sent as system instructions, while `user` and `assistant` messages will be concatenated to form the main prompt, like 'User: ...\nAssistant: ...\nUser: ...'.
+*   **Description:** Processes chat messages for the Gemini model. This endpoint is stateless. To provide conversation history, include all relevant past messages in the `messages` array. The service will serialize the **entire `messages` array into a JSON string**, and this JSON string is passed directly as the `prompt` to Gemini's underlying content generation capability. The Gemini model is then expected to interpret this JSON string as the conversational context.
 *   **Request Body (`OllamaChatRequest`)**:
     - `model` (string, required): The model name. (Similar model selection logic as `/ollama/api/generate`: uses request model, falls back to service config default, then library default).
     - `messages` (array of `OllamaChatMessage` objects, required): A list of message objects representing the conversation history. See `OllamaChatMessage` structure below.
     - `stream` (boolean, optional, default: `false`): Set to `false` for a non-streaming response. This endpoint **only supports `stream: false`**. Requests with `stream: true` will result in an error.
 *   **`OllamaChatMessage` Object Structure**:
-    - `role` (string): The role of the message sender. Can be "user", "assistant", or "system". (Note: Messages with 'role: "system"' are extracted and sent as system instructions to Gemini. Other messages form the conversational prompt.)
+    - `role` (string): The role of the message sender. Can be "user", "assistant", or "system". (Note: All messages, regardless of role - 'system', 'user', or 'assistant' - are included as part of the JSON string prompt sent to Gemini. How Gemini interprets these roles within the JSON string depends on its training.)
     - `content` (string): The text content of the message.
     - *(Note: Image input within messages is not supported in this version for the Ollama-compatible chat endpoint.)*
 *   **Example Request (curl):**
