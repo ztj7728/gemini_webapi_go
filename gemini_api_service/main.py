@@ -94,11 +94,6 @@ class OllamaGenerateResponse(BaseModel):
     prompt_eval_duration: Optional[int] = Field(default=0)
     eval_count: Optional[int] = Field(default=0)
     eval_duration: Optional[int] = Field(default=0)
-    # Common optional fields (not populated by this service yet)
-    # total_duration: Optional[int] = None
-    # load_duration: Optional[int] = None
-    # prompt_eval_count: Optional[int] = None
-    # eval_count: Optional[int] = None
 
 # Ollama Chat Compatibility Models
 class OllamaChatMessage(BaseModel):
@@ -133,18 +128,15 @@ class OllamaChatResponse(BaseModel):
 @app.post("/ollama/api/generate", response_model=OllamaGenerateResponse)
 async def ollama_generate_completion(request: OllamaGenerateRequest):
     if request.stream:
-        # Note: main.py already has HTTPException imported from fastapi
         raise HTTPException(status_code=400, detail="Streaming is not supported for this endpoint. Please set 'stream': false.")
 
-    client = await get_gemini_client() # Singleton client
+    client = await get_gemini_client()
 
     model_to_use_for_gemini = None
     if request.model and isinstance(request.model, str) and request.model.strip():
-        # Pass through the model name if provided.
-        # The gemini_webapi client will use its own default or raise error if invalid for Gemini.
         model_to_use_for_gemini = request.model
 
-    if not model_to_use_for_gemini: # If request.model was empty, not sensible, or not provided
+    if not model_to_use_for_gemini:
         config_default_model = app_config.get("gemini_settings", {}).get("default_model")
         if config_default_model and isinstance(config_default_model, str) and config_default_model.strip():
             model_to_use_for_gemini = config_default_model
@@ -152,29 +144,22 @@ async def ollama_generate_completion(request: OllamaGenerateRequest):
     try:
         gemini_response = await client.generate_content(
             prompt=request.prompt,
-            model=model_to_use_for_gemini # This can be None, gemini_webapi handles its default
+            model=model_to_use_for_gemini
         )
     except Exception as e:
         print(f"Error calling Gemini API via Ollama endpoint: {e}", file=sys.stderr)
-        # Consider more specific error mapping if needed, e.g. model not found vs. other API errors
         raise HTTPException(status_code=502, detail=f"Error communicating with Gemini API: {str(e)}")
 
-    # Determine the model name to include in the response.
-    # Ollama clients expect the model they requested to be in the response.
-    # If no model was in the request, use the one we determined (config default or None).
-    # If model_to_use_for_gemini ended up being None (so gemini_webapi used its absolute default),
-    # we should reflect that appropriately. For now, if request.model is empty, use our determined model or placeholder.
     response_model_name = request.model
-    if not response_model_name and model_to_use_for_gemini: # Request was empty, but we used a default
+    if not response_model_name and model_to_use_for_gemini:
         response_model_name = model_to_use_for_gemini
-    elif not response_model_name: # Request was empty, and we didn't have a default (so gemini_webapi used its own)
-        response_model_name = "gemini_api_default" # Placeholder, as we don't know the exact internal default name of gemini_webapi
+    elif not response_model_name:
+        response_model_name = "gemini_api_default"
 
     return OllamaGenerateResponse(
         model=response_model_name,
         created_at=datetime.utcnow().isoformat() + "Z",
         response=gemini_response.text
-        # Pydantic will handle default values for other fields like done, context, durations etc.
     )
 
 @app.post("/ollama/api/chat", response_model=OllamaChatResponse)
@@ -192,49 +177,48 @@ async def ollama_chat_completion(request: OllamaChatRequest):
         config_default_model = app_config.get("gemini_settings", {}).get("default_model")
         if config_default_model and isinstance(config_default_model, str) and config_default_model.strip():
             model_to_use_for_gemini = config_default_model
+    system_instruction_parts = []
+    prompt_parts = []
+
+    if not request.messages: # Should be caught by Pydantic if messages is non-optional and non-empty
+        raise HTTPException(status_code=400, detail="Messages list cannot be empty.")
+
+    for message in request.messages:
+        if message.role.lower() == "system":
+            system_instruction_parts.append(message.content)
+        elif message.role.lower() == "user":
+            prompt_parts.append(f"User: {message.content}")
+        elif message.role.lower() == "assistant":
+            prompt_parts.append(f"Assistant: {message.content}")
+        # Other roles are ignored as per current Ollama spec (usually user, assistant, system)
+
+    system_instruction_str = "\n".join(system_instruction_parts) if system_instruction_parts else None
+    formatted_prompt_str = "\n\n".join(prompt_parts)
+
+    if not formatted_prompt_str and not system_instruction_str:
+        raise HTTPException(status_code=400, detail="Received empty or invalid message content. At least one user, assistant, or system message is required.")
+
+    # If only system prompt is available, use it as the main prompt,
+    # and clear system_instruction_str to avoid redundancy or API error with some backends.
+    if not formatted_prompt_str and system_instruction_str:
+        formatted_prompt_str = system_instruction_str
+        system_instruction_str = None
 
     gemini_final_response_text = ""
     try:
-        # For Ollama chat, a new temporary session is created for each request.
-        # The history from request.messages is played into this temporary session.
-        if not request.messages:
-            raise HTTPException(status_code=400, detail="No messages provided in the chat request.")
+        gemini_response = await client.generate_content(
+            prompt=formatted_prompt_str,
+            model=model_to_use_for_gemini,
+            system_instruction=system_instruction_str
+        )
+        gemini_final_response_text = gemini_response.text
 
-        temp_chat_session = client.start_chat(model=model_to_use_for_gemini)
+        await check_and_update_refreshed_cookie() # Check and update after successful call
 
-        last_gemini_message_obj = None
-
-        # Iterate through messages. If a system message is first, it might be used to set context.
-        # For gemini_webapi, system prompts aren't explicitly passed to start_chat in the same way as some other APIs.
-        # We will send system messages as if they are user messages to build context.
-        # The final response will be to the last user message.
-
-        for message in request.messages:
-            if message.role.lower() == "user" or message.role.lower() == "system":
-                last_gemini_message_obj = await temp_chat_session.send_message(message.content)
-            elif message.role.lower() == "assistant":
-                # For gemini_webapi, the assistant's past messages are part of the ChatSession's internal history.
-                # We don't re-send assistant messages to `send_message`.
-                # If `gemini_webapi` required manual history building including assistant turns,
-                # this would be more complex. Assuming `send_message` builds on its own history.
-                pass # Do nothing with assistant messages from request, they are for context.
-
-        if last_gemini_message_obj:
-            gemini_final_response_text = last_gemini_message_obj.text
-        else:
-            # This might occur if only assistant messages were in the request, or no user/system messages.
-            # Pydantic model for response content is not optional, so ensure a string.
-            # Or, if the last message was assistant and we didn't get a new response from Gemini.
-            # It's better to raise an error if no actual response was generated from a user/system prompt.
-            if not any(m.role.lower() in ["user", "system"] for m in request.messages):
-                 raise HTTPException(status_code=400, detail="No user or system messages found to generate a response.")
-            # If there were user/system messages but no response object, it's an unexpected state.
-            gemini_final_response_text = "" # Default empty if something went wrong after processing messages.
-
-    except HTTPException: # Re-raise HTTPException directly
+    except HTTPException: # Re-raise HTTPException directly (e.g. from get_gemini_client)
         raise
     except Exception as e:
-        print(f"Error during Ollama chat compatibility call to Gemini API: {e}", file=sys.stderr)
+        print(f"Error during Ollama chat compatibility call to Gemini API (generate_content): {e}", file=sys.stderr)
         raise HTTPException(status_code=502, detail=f"Error communicating with Gemini API: {str(e)}")
 
     response_model_name = request.model

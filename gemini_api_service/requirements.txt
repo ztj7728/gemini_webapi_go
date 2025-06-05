@@ -4,3 +4,6 @@ uvicorn
 pytest
 pytest-asyncio
 httpx
+fastapi
+gemini_webapi
+uvicorn
