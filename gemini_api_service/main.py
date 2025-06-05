@@ -87,11 +87,48 @@ class OllamaGenerateResponse(BaseModel):
     created_at: str  # ISO 8601 timestamp string
     response: str
     done: bool = Field(default=True) # Always True for non-streaming
+    context: Optional[List[int]] = Field(default=None)
+    total_duration: Optional[int] = Field(default=0)
+    load_duration: Optional[int] = Field(default=0)
+    prompt_eval_count: Optional[int] = Field(default=0)
+    prompt_eval_duration: Optional[int] = Field(default=0)
+    eval_count: Optional[int] = Field(default=0)
+    eval_duration: Optional[int] = Field(default=0)
     # Common optional fields (not populated by this service yet)
     # total_duration: Optional[int] = None
     # load_duration: Optional[int] = None
     # prompt_eval_count: Optional[int] = None
     # eval_count: Optional[int] = None
+
+# Ollama Chat Compatibility Models
+class OllamaChatMessage(BaseModel):
+    role: str  # e.g., "user", "assistant", "system"
+    content: str
+    # images: Optional[List[str]] = None # Per plan, omitting images for v1
+
+class OllamaChatRequest(BaseModel):
+    model: str
+    messages: List[OllamaChatMessage]
+    stream: Optional[bool] = Field(default=False)
+    # Other optional fields like 'format', 'options', 'template' can be omitted for v1
+
+class OllamaChatCompletionMessage(BaseModel):
+    role: str  # Will typically be "assistant"
+    content: str
+    # images: Optional[List[str]] = None # Omitting for v1
+
+class OllamaChatResponse(BaseModel):
+    model: str
+    created_at: str  # ISO 8601 timestamp string
+    message: OllamaChatCompletionMessage
+    done: bool = Field(default=True) # Always True for non-streaming
+    total_duration: Optional[int] = Field(default=0)
+    load_duration: Optional[int] = Field(default=0)
+    prompt_eval_count: Optional[int] = Field(default=0)
+    prompt_eval_duration: Optional[int] = Field(default=0)
+    eval_count: Optional[int] = Field(default=0)
+    eval_duration: Optional[int] = Field(default=0)
+
 
 @app.post("/ollama/api/generate", response_model=OllamaGenerateResponse)
 async def ollama_generate_completion(request: OllamaGenerateRequest):
@@ -136,8 +173,83 @@ async def ollama_generate_completion(request: OllamaGenerateRequest):
     return OllamaGenerateResponse(
         model=response_model_name,
         created_at=datetime.utcnow().isoformat() + "Z",
-        response=gemini_response.text,
-        # `done` is True by default in Pydantic model
+        response=gemini_response.text
+        # Pydantic will handle default values for other fields like done, context, durations etc.
+    )
+
+@app.post("/ollama/api/chat", response_model=OllamaChatResponse)
+async def ollama_chat_completion(request: OllamaChatRequest):
+    if request.stream:
+        raise HTTPException(status_code=400, detail="Streaming is not supported for this endpoint. Please set 'stream': false.")
+
+    client = await get_gemini_client()
+
+    model_to_use_for_gemini = None
+    if request.model and isinstance(request.model, str) and request.model.strip():
+        model_to_use_for_gemini = request.model
+
+    if not model_to_use_for_gemini:
+        config_default_model = app_config.get("gemini_settings", {}).get("default_model")
+        if config_default_model and isinstance(config_default_model, str) and config_default_model.strip():
+            model_to_use_for_gemini = config_default_model
+
+    gemini_final_response_text = ""
+    try:
+        # For Ollama chat, a new temporary session is created for each request.
+        # The history from request.messages is played into this temporary session.
+        if not request.messages:
+            raise HTTPException(status_code=400, detail="No messages provided in the chat request.")
+
+        temp_chat_session = client.start_chat(model=model_to_use_for_gemini)
+
+        last_gemini_message_obj = None
+
+        # Iterate through messages. If a system message is first, it might be used to set context.
+        # For gemini_webapi, system prompts aren't explicitly passed to start_chat in the same way as some other APIs.
+        # We will send system messages as if they are user messages to build context.
+        # The final response will be to the last user message.
+
+        for message in request.messages:
+            if message.role.lower() == "user" or message.role.lower() == "system":
+                last_gemini_message_obj = await temp_chat_session.send_message(message.content)
+            elif message.role.lower() == "assistant":
+                # For gemini_webapi, the assistant's past messages are part of the ChatSession's internal history.
+                # We don't re-send assistant messages to `send_message`.
+                # If `gemini_webapi` required manual history building including assistant turns,
+                # this would be more complex. Assuming `send_message` builds on its own history.
+                pass # Do nothing with assistant messages from request, they are for context.
+
+        if last_gemini_message_obj:
+            gemini_final_response_text = last_gemini_message_obj.text
+        else:
+            # This might occur if only assistant messages were in the request, or no user/system messages.
+            # Pydantic model for response content is not optional, so ensure a string.
+            # Or, if the last message was assistant and we didn't get a new response from Gemini.
+            # It's better to raise an error if no actual response was generated from a user/system prompt.
+            if not any(m.role.lower() in ["user", "system"] for m in request.messages):
+                 raise HTTPException(status_code=400, detail="No user or system messages found to generate a response.")
+            # If there were user/system messages but no response object, it's an unexpected state.
+            gemini_final_response_text = "" # Default empty if something went wrong after processing messages.
+
+    except HTTPException: # Re-raise HTTPException directly
+        raise
+    except Exception as e:
+        print(f"Error during Ollama chat compatibility call to Gemini API: {e}", file=sys.stderr)
+        raise HTTPException(status_code=502, detail=f"Error communicating with Gemini API: {str(e)}")
+
+    response_model_name = request.model
+    if not response_model_name and model_to_use_for_gemini:
+        response_model_name = model_to_use_for_gemini
+    elif not response_model_name:
+        response_model_name = "gemini_api_default"
+
+    return OllamaChatResponse(
+        model=response_model_name,
+        created_at=datetime.utcnow().isoformat() + "Z",
+        message=OllamaChatCompletionMessage(
+            role="assistant",
+            content=gemini_final_response_text
+        )
     )
 
 async def get_gemini_client() -> GeminiClient:

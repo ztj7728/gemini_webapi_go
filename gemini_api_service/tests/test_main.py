@@ -239,7 +239,6 @@ async def test_image_save_failure_handling(client, mock_gemini_webapi_client_ins
         mock_uuid = MagicMock(); mock_uuid.hex = "ok_uuid"; mock_uuid_patch.return_value = mock_uuid
         response = await client.post("/generate", json={"prompt": "get mixed images"})
     data = response.json(); assert len(data["images"]) == 1; img_detail = data["images"][0]
-    # Ensure img_ok_url is in scope for the assertion by using the attribute from the mock object
     assert img_detail["original_google_url"] == mock_img_ok.url and img_detail["image_type"] == "web"
     mock_img_fail.save.assert_called_once(); mock_img_ok.save.assert_called_once()
 
@@ -261,7 +260,7 @@ def test_static_files_mounted_correctly(mock_os_path_isdir, mock_os_makedirs, mo
 
 # --- Adjusted existing tests (condensed for brevity but complete logic) ---
 @pytest.mark.asyncio
-async def test_generate_success(client, mock_gemini_webapi_client_instance): # Keep this one less condensed for an example
+async def test_generate_success(client, mock_gemini_webapi_client_instance):
     expected_json = {"response": "Test response", "thoughts": "Test thoughts for generate", "images": [{ "url": f"{DEFAULT_TEST_CONFIG['image_serving']['public_base_url']}{DEFAULT_TEST_CONFIG['image_serving']['serve_path_prefix']}/testuuid.png", "title": "Gen Title 1", "alt": "Gen Alt 1", "image_type": "web", "original_google_url": "http://example.com/gen_img1.jpg" }] }
     mock_gemini_image = MockGeminiImage("http://example.com/gen_img1.jpg", "Gen Title 1", "Gen Alt 1", spec_type="web")
     mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse("Test response", thoughts="Test thoughts for generate", images=[mock_gemini_image])
@@ -343,24 +342,25 @@ def is_isoformat_utc(s: str) -> bool:
 @pytest.mark.asyncio
 async def test_ollama_generate_success_non_streaming(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
     mock_load_config, _, _ = reset_main_globals_and_config_mocks
-    # Ensure generate_content returns a simple response for this test
-    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(
-        text="Ollama compatible response text"
-    )
-
+    mock_gemini_webapi_client_instance.generate_content.return_value = MockGeminiResponse(text="Ollama compatible response text")
     request_payload = {"model": "test-gemini-model", "prompt": "ollama test prompt", "stream": False}
     response = await client.post("/ollama/api/generate", json=request_payload)
-
     assert response.status_code == 200
     data = response.json()
-
     assert data["model"] == "test-gemini-model"
     assert data["response"] == "Ollama compatible response text"
     assert data["done"] is True
     assert "created_at" in data
     assert is_isoformat_utc(data["created_at"])
-    assert "thoughts" not in data  # Ensure extended fields are not present
+    assert "thoughts" not in data
     assert "images" not in data
+    assert data.get("context") is None
+    assert data.get("total_duration") == 0
+    assert data.get("load_duration") == 0
+    assert data.get("prompt_eval_count") == 0
+    assert data.get("prompt_eval_duration") == 0
+    assert data.get("eval_count") == 0
+    assert data.get("eval_duration") == 0
 
 @pytest.mark.asyncio
 async def test_ollama_generate_error_if_stream_true(client):
@@ -372,43 +372,102 @@ async def test_ollama_generate_error_if_stream_true(client):
 @pytest.mark.asyncio
 async def test_ollama_generate_model_selection_logic(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
     mock_load_config, _, _ = reset_main_globals_and_config_mocks
-
-    # Test 1: Request model is used
     mock_gemini_webapi_client_instance.generate_content.reset_mock()
-    cfg_with_default = copy.deepcopy(DEFAULT_TEST_CONFIG)
-    cfg_with_default["gemini_settings"]["default_model"] = "config-default-gemini"
-    mock_load_config.return_value = cfg_with_default
-    gemini_api_service.main.app_config = cfg_with_default
-
+    cfg_with_default = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg_with_default["gemini_settings"]["default_model"] = "config-default-gemini"
+    mock_load_config.return_value = cfg_with_default; gemini_api_service.main.app_config = cfg_with_default
     await client.post("/ollama/api/generate", json={"model": "request-gemini-model", "prompt": "test", "stream": False})
     mock_gemini_webapi_client_instance.generate_content.assert_called_once_with(prompt="test", model="request-gemini-model")
-    # Check response model field reflects request.model
     response_data = (await client.post("/ollama/api/generate", json={"model": "request-gemini-model", "prompt": "test", "stream": False})).json()
     assert response_data["model"] == "request-gemini-model"
-
-
-    # Test 2: Config default model is used if request model is empty
-    mock_gemini_webapi_client_instance.generate_content.reset_mock() # Reset for next assertion
-    # Config already set to cfg_with_default with "config-default-gemini"
+    mock_gemini_webapi_client_instance.generate_content.reset_mock()
     response_data_config = (await client.post("/ollama/api/generate", json={"model": "", "prompt": "test", "stream": False})).json()
     mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt="test", model="config-default-gemini")
-    assert response_data_config["model"] == "config-default-gemini" # main.py logic for response_model_name
-
-    # Test 3: Library default model is used (model=None passed to client)
+    assert response_data_config["model"] == "config-default-gemini"
     mock_gemini_webapi_client_instance.generate_content.reset_mock()
-    cfg_no_default = copy.deepcopy(DEFAULT_TEST_CONFIG)
-    cfg_no_default["gemini_settings"]["default_model"] = None
-    mock_load_config.return_value = cfg_no_default
-    gemini_api_service.main.app_config = cfg_no_default
-
+    cfg_no_default = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg_no_default["gemini_settings"]["default_model"] = None
+    mock_load_config.return_value = cfg_no_default; gemini_api_service.main.app_config = cfg_no_default
     response_data_lib = (await client.post("/ollama/api/generate", json={"model": "", "prompt": "test", "stream": False})).json()
     mock_gemini_webapi_client_instance.generate_content.assert_called_with(prompt="test", model=None)
-    assert response_data_lib["model"] == "gemini_api_default" # Placeholder from main.py
+    assert response_data_lib["model"] == "gemini_api_default"
 
 @pytest.mark.asyncio
 async def test_ollama_generate_gemini_api_error_propagates(client, mock_gemini_webapi_client_instance):
     mock_gemini_webapi_client_instance.generate_content.side_effect = Exception("Gemini call failed")
-
     response = await client.post("/ollama/api/generate", json={"model": "test", "prompt": "test", "stream": False})
-    assert response.status_code == 502
-    assert "Error communicating with Gemini API: Gemini call failed" in response.json()["detail"]
+    assert response.status_code == 502; assert "Error communicating with Gemini API: Gemini call failed" in response.json()["detail"]
+
+# --- Tests for /ollama/api/chat endpoint ---
+@pytest.mark.asyncio
+async def test_ollama_chat_success_non_streaming(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks; gemini_api_service.main.app_config = mock_load_config()
+    mock_chat_session = mock_gemini_webapi_client_instance.start_chat.return_value
+    mock_chat_session._send_message_mock_attr.return_value = MockGeminiResponse(text="Ollama chat response")
+    request_payload = {"model": "test-gemini-chat-model", "messages": [{"role": "user", "content": "Hello from Ollama chat"}], "stream": False}
+    response = await client.post("/ollama/api/chat", json=request_payload)
+    assert response.status_code == 200; data = response.json()
+    assert data["model"] == "test-gemini-chat-model"; assert data["message"]["role"] == "assistant"; assert data["message"]["content"] == "Ollama chat response"; assert data["done"] is True; assert "created_at" in data; assert is_isoformat_utc(data["created_at"])
+    assert data.get("context") is None; assert data.get("total_duration") == 0; assert data.get("load_duration") == 0; assert data.get("prompt_eval_count") == 0; assert data.get("prompt_eval_duration") == 0; assert data.get("eval_count") == 0; assert data.get("eval_duration") == 0
+
+@pytest.mark.asyncio
+async def test_ollama_chat_error_if_stream_true(client):
+    request_payload = {"model": "test-model", "messages": [], "stream": True}
+    response = await client.post("/ollama/api/chat", json=request_payload)
+    assert response.status_code == 400; assert "Streaming is not supported" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_ollama_chat_model_selection_logic(client, mock_gemini_webapi_client_instance, reset_main_globals_and_config_mocks):
+    mock_load_config, _, _ = reset_main_globals_and_config_mocks
+    mock_gemini_webapi_client_instance.start_chat.reset_mock()
+    cfg_with_default = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg_with_default["gemini_settings"]["default_model"] = "config-default-gemini"
+    mock_load_config.return_value = cfg_with_default; gemini_api_service.main.app_config = cfg_with_default
+    await client.post("/ollama/api/chat", json={"model": "request-gemini-model", "messages": [{"role": "user", "content": "test"}], "stream": False})
+    mock_gemini_webapi_client_instance.start_chat.assert_called_once_with(model="request-gemini-model")
+    response_data = (await client.post("/ollama/api/chat", json={"model": "request-gemini-model", "messages": [{"role": "user", "content": "test"}], "stream": False})).json()
+    assert response_data["model"] == "request-gemini-model"
+    mock_gemini_webapi_client_instance.start_chat.reset_mock()
+    response_data_config = (await client.post("/ollama/api/chat", json={"model": "", "messages": [{"role": "user", "content": "test"}], "stream": False})).json()
+    mock_gemini_webapi_client_instance.start_chat.assert_called_with(model="config-default-gemini")
+    assert response_data_config["model"] == "config-default-gemini"
+    mock_gemini_webapi_client_instance.start_chat.reset_mock()
+    cfg_no_default = copy.deepcopy(DEFAULT_TEST_CONFIG); cfg_no_default["gemini_settings"]["default_model"] = None
+    mock_load_config.return_value = cfg_no_default; gemini_api_service.main.app_config = cfg_no_default
+    response_data_lib = (await client.post("/ollama/api/chat", json={"model": "", "messages": [{"role": "user", "content": "test"}], "stream": False})).json()
+    mock_gemini_webapi_client_instance.start_chat.assert_called_with(model=None)
+    assert response_data_lib["model"] == "gemini_api_default"
+
+@pytest.mark.asyncio
+async def test_ollama_chat_gemini_api_error_start_chat(client, mock_gemini_webapi_client_instance):
+    mock_gemini_webapi_client_instance.start_chat.side_effect = Exception("Gemini start_chat failed")
+    response = await client.post("/ollama/api/chat", json={"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": False})
+    assert response.status_code == 502; assert "Error communicating with Gemini API: Gemini start_chat failed" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_ollama_chat_gemini_api_error_send_message(client, mock_gemini_webapi_client_instance):
+    mock_chat_session = mock_gemini_webapi_client_instance.start_chat.return_value
+    mock_chat_session._send_message_mock_attr.side_effect = Exception("Gemini send_message failed") # Corrected
+    response = await client.post("/ollama/api/chat", json={"model": "test", "messages": [{"role": "user", "content": "test"}], "stream": False})
+    assert response.status_code == 502; assert "Error communicating with Gemini API: Gemini send_message failed" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_ollama_chat_message_processing_order_and_response(client, mock_gemini_webapi_client_instance):
+    mock_chat_session = mock_gemini_webapi_client_instance.start_chat.return_value
+    async def send_message_side_effect(prompt_content):
+        if "first user message" in prompt_content: return MockGeminiResponse("Response to first")
+        elif "second user message" in prompt_content: return MockGeminiResponse("Response to second")
+        return MockGeminiResponse("Default fallback response")
+    mock_chat_session.send_message = AsyncMock(side_effect=send_message_side_effect)
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "This is the first user message"}, {"role": "assistant", "content": "Assistant history message"}, {"role": "user", "content": "This is the second user message"}]
+    request_payload = {"model": "test-model", "messages": messages, "stream": False}
+    response = await client.post("/ollama/api/chat", json=request_payload)
+    assert response.status_code == 200; data = response.json(); assert data["message"]["content"] == "Response to second"
+    assert mock_chat_session.send_message.call_count == 3
+    mock_chat_session.send_message.assert_any_call("System prompt"); mock_chat_session.send_message.assert_any_call("This is the first user message"); mock_chat_session.send_message.assert_any_call("This is the second user message")
+
+@pytest.mark.asyncio
+async def test_ollama_chat_error_if_no_user_or_system_messages(client, mock_gemini_webapi_client_instance): # Added mock_gemini_webapi_client_instance
+    request_payload_empty = {"model": "test-model", "messages": [], "stream": False}
+    response_empty = await client.post("/ollama/api/chat", json=request_payload_empty)
+    assert response_empty.status_code == 400; assert "No messages provided" in response_empty.json()["detail"]
+    request_payload_assistant_only = {"model": "test-model", "messages": [{"role": "assistant", "content": "I said something"}], "stream": False}
+    response_assistant_only = await client.post("/ollama/api/chat", json=request_payload_assistant_only)
+    assert response_assistant_only.status_code == 400 ; assert "No user or system messages found" in response_assistant_only.json()["detail"]

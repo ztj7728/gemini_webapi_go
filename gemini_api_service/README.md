@@ -230,7 +230,7 @@ This section details the custom API endpoints provided by this service. For Olla
 
 This service offers experimental endpoints designed to mimic parts of the Ollama API. This allows for easier integration with existing tools and clients that are compatible with Ollama.
 
-**Note**: These compatible endpoints aim for basic functionality. They may not support all features available in the native Gemini API or this service's custom endpoints (e.g., `thoughts` and `images` are not returned by the Ollama-compatible `/generate` endpoint).
+**Note**: These compatible endpoints aim for basic functionality. They may not support all features available in the native Gemini API or this service's custom endpoints.
 
 ### 1. Generate Completion (Ollama-Compatible)
 
@@ -255,16 +255,90 @@ This service offers experimental endpoints designed to mimic parts of the Ollama
     - `created_at` (string): Timestamp of response generation in ISO 8601 format (UTC).
     - `response` (string): The text response from the Gemini model.
     - `done` (boolean): Always `true` for this non-streaming endpoint.
+    - `context` (array of integers, optional): Context array from the model. *Note: For this Gemini-backed endpoint, this field is included for Ollama compatibility and will typically be `null`.*
+    - `total_duration` (integer, optional): Total time spent generating the response. *Note: For this Gemini-backed endpoint, this is a default value (e.g., 0) and does not reflect actual Gemini processing time.*
+    - `load_duration` (integer, optional): Time spent loading the model. *Note: Default value (e.g., 0) for compatibility.*
+    - `prompt_eval_count` (integer, optional): Number of tokens in the prompt. *Note: Default value (e.g., 0) for compatibility.*
+    - `prompt_eval_duration` (integer, optional): Time spent evaluating the prompt. *Note: Default value (e.g., 0) for compatibility.*
+    - `eval_count` (integer, optional): Number of tokens in the response. *Note: Default value (e.g., 0) for compatibility.*
+    - `eval_duration` (integer, optional): Time spent generating the response. *Note: Default value (e.g., 0) for compatibility.*
 *   **Example Response**:
     ```json
     {
         "model": "gemini-2.5-pro",
         "created_at": "2023-10-26T12:34:56.123456Z",
         "response": "The sky is blue due to a phenomenon called Rayleigh scattering...",
-        "done": true
+        "done": true,
+        "context": null,
+        "total_duration": 0,
+        "load_duration": 0,
+        "prompt_eval_count": 0,
+        "prompt_eval_duration": 0,
+        "eval_count": 0,
+        "eval_duration": 0
     }
     ```
-*   **Note on Features**: This endpoint provides a basic text response compatible with Ollama's non-streaming generate API. Features like `thoughts` and `images` available in this service's custom `/generate` endpoint are **not** included in this Ollama-compatible response.
+*   **Note on Features**: This endpoint provides a basic text response compatible with Ollama's non-streaming generate API. Features like `thoughts` and `images` available in this service's custom `/generate` endpoint are **not** included in this Ollama-compatible response. The additional duration and token count fields are included for API signature compatibility but are populated with default values (e.g., 0 or `null`) rather than actual metrics from the Gemini API.
+
+### 2. Chat Completions (Ollama-Compatible)
+
+*   **Endpoint:** `POST /ollama/api/chat`
+*   **Description:** Provides a non-streaming equivalent to Ollama's `/api/chat` endpoint, powered by Gemini. Each call is treated as a new conversation by replaying the provided message history to a fresh Gemini chat session.
+*   **Request Body (`OllamaChatRequest`)**:
+    - `model` (string, required): The model name. (Similar model selection logic as `/ollama/api/generate`: uses request model, falls back to service config default, then library default).
+    - `messages` (array of `OllamaChatMessage` objects, required): A list of message objects representing the conversation history. See `OllamaChatMessage` structure below.
+    - `stream` (boolean, optional, default: `false`): Set to `false` for a non-streaming response. This endpoint **only supports `stream: false`**. Requests with `stream: true` will result in an error.
+*   **`OllamaChatMessage` Object Structure**:
+    - `role` (string): The role of the message sender. Can be "user", "assistant", or "system". (Note: For Gemini, 'system' prompts are treated similarly to 'user' prompts when replaying the history).
+    - `content` (string): The text content of the message.
+    - *(Note: Image input within messages is not supported in this version for the Ollama-compatible chat endpoint.)*
+*   **Example Request (curl):**
+    ```bash
+    curl -X POST "http://localhost:8000/ollama/api/chat" \
+         -H "Content-Type: application/json" \
+         -d '{
+               "model": "gemini-2.5-pro",
+               "messages": [
+                 {"role": "system", "content": "You are a helpful assistant."},
+                 {"role": "user", "content": "Hello, what is your name?"},
+                 {"role": "assistant", "content": "I am a large language model powered by Gemini."},
+                 {"role": "user", "content": "What can you do?"}
+               ],
+               "stream": false
+             }'
+    ```
+*   **Response Body (`OllamaChatResponse`)**:
+    - `model` (string): The model name that was requested or used.
+    - `created_at` (string): Timestamp in ISO 8601 format (UTC).
+    - `message` (`OllamaChatCompletionMessage` object): The assistant's response message.
+        - `role` (string): Always "assistant".
+        - `content` (string): "The text response from the Gemini model."
+    - `done` (boolean): Always `true` for this non-streaming endpoint.
+    - `total_duration` (integer, optional): Default value (e.g., 0). See note under `/ollama/api/generate`.
+    - `load_duration` (integer, optional): Default value (e.g., 0).
+    - `prompt_eval_count` (integer, optional): Default value (e.g., 0).
+    - `prompt_eval_duration` (integer, optional): Default value (e.g., 0).
+    - `eval_count` (integer, optional): Default value (e.g., 0).
+    - `eval_duration` (integer, optional): Default value (e.g., 0).
+*   **Example Response**:
+    ```json
+    {
+        "model": "gemini-2.5-pro",
+        "created_at": "2023-10-26T12:35:00.123456Z",
+        "message": {
+            "role": "assistant",
+            "content": "I can help answer your questions, generate text, and much more!"
+        },
+        "done": true,
+        "total_duration": 0,
+        "load_duration": 0,
+        "prompt_eval_count": 0,
+        "prompt_eval_duration": 0,
+        "eval_count": 0,
+        "eval_duration": 0
+    }
+    ```
+*   **Note on Features**: This endpoint provides a basic text response based on the message history. Features like `thoughts` and `images` available in this service's custom `/chat` endpoint (using `chat_id`) are **not** included in this Ollama-compatible response. Conversation history is managed by replaying the `messages` array in each request to a new Gemini chat session. The additional duration and token count fields are included for API signature compatibility but are populated with default values.
 
 ## Error Handling
 
