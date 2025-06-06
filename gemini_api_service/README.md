@@ -338,7 +338,9 @@ This service offers experimental endpoints designed to mimic parts of the Ollama
         "eval_duration": 0
     }
     ```
-*   **Note on Features**: This endpoint provides a basic text response based on the message history. Features like `thoughts` and `images` available in this service's custom `/chat` endpoint (using `chat_id`) are **not** included in this Ollama-compatible response. Conversation history is managed by replaying the `messages` array in each request to a new Gemini chat session. The additional duration and token count fields are included for API signature compatibility but are populated with default values.
+*   **Note on Features**: This endpoint provides a basic text response based on the message history. Features like `thoughts` and `images` available in this service's custom `/chat` endpoint (using `chat_id`) are **not** included in this Ollama-compatible response. Conversation history is managed by sending the entire `messages` array as a JSON string in each request to Gemini's `generate_content` method. The additional duration and token count fields are included for API signature compatibility but are populated with default values.
+
+**Note on Special Characters in Response Content**: Please be aware that content returned from the underlying Gemini API (via the `gemini_webapi` library) may have certain characters or tags (e.g., HTML/XML-style tags like `<tag>`) escaped (e.g., as `\<tag\>`) or otherwise sanitized. This API service passes through the content as received from the library. If you observe such escaping in the responses, it originates from the downstream library or the Gemini API backend itself. You may need to implement un-escaping logic on your client-side if you require the original, unescaped characters for specific tags.
 
 ## Error Handling
 

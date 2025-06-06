@@ -213,13 +213,16 @@ async def ollama_chat_completion(request: OllamaChatRequest):
     elif not response_model_name:
         response_model_name = "gemini_api_default"
 
+    chat_message_to_return = OllamaChatCompletionMessage(
+        role="assistant",
+        content=gemini_final_response_text
+    )
+
     return OllamaChatResponse(
         model=response_model_name,
         created_at=datetime.utcnow().isoformat() + "Z",
-        message=OllamaChatCompletionMessage(
-            role="assistant",
-            content=gemini_final_response_text
-        )
+        message=chat_message_to_return,
+        # done=True and metrics will be defaulted by Pydantic
     )
 
 async def get_gemini_client() -> GeminiClient:
